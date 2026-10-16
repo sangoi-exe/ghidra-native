@@ -1,0 +1,404 @@
+diff --git a/src/decompiler/architecture.cc b/src/decompiler/architecture.cc
+--- a/src/decompiler/architecture.cc
++++ b/src/decompiler/architecture.cc
+@@ -45,6 +45,7 @@
+ AttributeId ATTRIB_PARENT = AttributeId("parent",109);
+ AttributeId ATTRIB_REGISTER = AttributeId("register",110);
+ AttributeId ATTRIB_REVERSEJUSTIFY = AttributeId("reversejustify",111);
++AttributeId ATTRIB_SEGMENTREGISTER = AttributeId("segmentregister",159);
+ AttributeId ATTRIB_SIGNEXT = AttributeId("signext",112);
+ AttributeId ATTRIB_STYLE = AttributeId("style",113);
+
+@@ -157,6 +158,7 @@
+   funcptr_align = 0;
+   defaultfp = (ProtoModel *)0;
+   defaultReturnAddr.space = (AddrSpace *)0;
++  stackSegment.space = (AddrSpace *)0;
+   evalfp_current = (ProtoModel *)0;
+   evalfp_called = (ProtoModel *)0;
+   types = (TypeFactory *)0;
+@@ -661,6 +663,12 @@
+ void Architecture::initializeSegments(void)
+
+ {
++  if (stackSegment.space != (AddrSpace *)0) {
++    SegmentOp *segdef = userops.getSegmentOp(getStackSpace()->getContain()->getIndex());
++    if (segdef == (SegmentOp *)0 || segdef->getBaseSize() != stackSegment.size ||
++        segdef->getInnerSize() != getStackSpace()->getAddrSize())
++      throw LowlevelError("Stackpointer registers do not match the stack space's segment operation");
++  }
+   int4 sz = userops.numSegmentOps();
+   for(int4 i=0;i<sz;++i) {
+     SegmentOp *sop = userops.getSegmentOp(i);
+@@ -1007,6 +1015,8 @@
+       basespace = decoder.readSpace();
+     else if (attribId == ATTRIB_REGISTER)
+       registerName = decoder.readString();
++    else if (attribId == ATTRIB_SEGMENTREGISTER)
++      stackSegment = translate->getRegister(decoder.readString());
+   }
+
+   if (basespace == (AddrSpace *)0)
+diff --git a/src/decompiler/architecture.hh b/src/decompiler/architecture.hh
+--- a/src/decompiler/architecture.hh
++++ b/src/decompiler/architecture.hh
+@@ -73,6 +73,7 @@
+ extern AttributeId ATTRIB_PARENT;	///< Marshaling attribute "parent"
+ extern AttributeId ATTRIB_REGISTER;	///< Marshaling attribute "register"
+ extern AttributeId ATTRIB_REVERSEJUSTIFY;	///< Marshaling attribute "reversejustify"
++extern AttributeId ATTRIB_SEGMENTREGISTER; ///< Marshaling attribute "segmentregister"
+ extern AttributeId ATTRIB_SIGNEXT;	///< Marshaling attribute "signext"
+ extern AttributeId ATTRIB_STYLE;	///< Marshaling attribute "style"
+
+@@ -193,6 +194,7 @@
+   map<string,ProtoModel *> protoModels; ///< Parsed forms of possible prototypes
+   ProtoModel *defaultfp;	///< Parsed form of default prototype
+   VarnodeData defaultReturnAddr;	///< Default storage location of return address (for current function)
++  VarnodeData stackSegment;	///< Optional register holding the formal stack's segment selector
+   ProtoModel *evalfp_current;	///< Function proto to use when evaluating current function
+   ProtoModel *evalfp_called;	///< Function proto to use when evaluating called functions
+   TypeFactory *types;		///< List of types for this binary
+diff --git a/src/decompiler/marshal.cc b/src/decompiler/marshal.cc
+--- a/src/decompiler/marshal.cc
++++ b/src/decompiler/marshal.cc
+@@ -1258,7 +1258,7 @@
+ AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+ AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
+
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",159); // Number serves as next open index
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",160); // Number serves as next open index
+
+
+ ElementId ELEM_DATA = ElementId("data",1);
+diff --git a/src/decompiler/funcdata.hh b/src/decompiler/funcdata.hh
+--- a/src/decompiler/funcdata.hh
++++ b/src/decompiler/funcdata.hh
+@@ -496,7 +496,7 @@
+   void opFlipCondition(PcodeOp *op) { op->flipFlag(PcodeOp::boolean_flip); }	///< Flip output condition of given CBRANCH
+   PcodeOp *target(const Address &addr) const { return obank.target(addr); }	///< Look up a PcodeOp by an instruction Address
+   Varnode *createStackRef(AddrSpace *spc,uintb off,PcodeOp *op,Varnode *stackptr,bool insertafter);
+-  Varnode *opStackLoad(AddrSpace *spc,uintb off,uint4 sz,PcodeOp *op,Varnode *stackptr,bool insertafter);
++  Varnode *opStackLoad(AddrSpace *spc,uintb off,uint4 sz,PcodeOp *op,Varnode *stackptr,bool insertafter,bool isPlaceholder=false);
+   PcodeOp *opStackStore(AddrSpace *spc,uintb off,PcodeOp *op,bool insertafter);
+   Varnode *opBoolNegate(Varnode *vn,PcodeOp *op,bool insertafter);
+   void opUndoPtradd(PcodeOp *op,bool finalize);	///< Convert a CPUI_PTRADD back into a CPUI_INT_ADD
+diff --git a/src/decompiler/funcdata_op.cc b/src/decompiler/funcdata_op.cc
+--- a/src/decompiler/funcdata_op.cc
++++ b/src/decompiler/funcdata_op.cc
+@@ -524,11 +524,28 @@
+ /// \param op is the insertion point PcodeOp
+ /// \param stackref is the \e spacebase register Varnode (if available)
+ /// \param insertafter is \b true if new ops are inserted \e after the insertion point
++/// \param isPlaceholder is \b true for offset-only bookkeeping, rather than an actual call-argument read
+ /// \return the \e unique space Varnode holding the result of the LOAD
+-Varnode *Funcdata::opStackLoad(AddrSpace *spc,uintb off,uint4 sz,PcodeOp *op,Varnode *stackref,bool insertafter)
+-
+-{
++Varnode *Funcdata::opStackLoad(AddrSpace *spc,uintb off,uint4 sz,PcodeOp *op,Varnode *stackref,bool insertafter,bool isPlaceholder)
++
++{
++    Varnode *selector = (Varnode *)0;
++    if (!isPlaceholder && op->isCall() && spc == glb->getStackSpace() && glb->stackSegment.space != (AddrSpace *)0) {
++      // Heritage links this read to the declared register's value at the CALL, including reads introduced by late prototype recovery.
++      selector = newVarnode(glb->stackSegment.size,glb->stackSegment.getAddr());
++    }
+     Varnode *addout = createStackRef(spc,off,op,stackref,insertafter);
++    if (selector != (Varnode *)0) {
++      // The displacement must wrap at the near-pointer width before segmentation.
++      PcodeOp *segment = newOp(3,op->getAddr());
++      opSetOpcode(segment,CPUI_SEGMENTOP);
++      opSetInput(segment,newVarnodeSpace(spc->getContain()),0);
++      opSetInput(segment,selector,1);
++      opSetInput(segment,addout,2);
++      Varnode *address = newUniqueOut(spc->getContain()->getAddrSize(),segment);
++      opInsertAfter(segment,addout->getDef());
++      addout = address;
++    }
+     PcodeOp *loadop = newOp(2,op->getAddr());
+     opSetOpcode(loadop,CPUI_LOAD);
+     opSetInput(loadop,newVarnodeSpace(spc->getContain()),0);
+diff --git a/src/decompiler/coreaction.cc b/src/decompiler/coreaction.cc
+--- a/src/decompiler/coreaction.cc
++++ b/src/decompiler/coreaction.cc
+@@ -1556,6 +1556,8 @@
+     PcodeOp *op = fc->getOp();
+     int4 numparam = fc->numParams();
+     bool setplaceholder = varargs;
++    if (spacebase == data.getArch()->getStackSpace() && data.getArch()->stackSegment.space != (AddrSpace *)0)
++      setplaceholder = true;	// Keep offset bookkeeping separate from selector-qualified arguments
+     for(int4 i=0;i<numparam;++i) {
+       ProtoParameter *param = fc->getParam(i);
+       active->registerTrial(param->getAddress(),param->getSize());
+diff --git a/src/decompiler/fspec.cc b/src/decompiler/fspec.cc
+--- a/src/decompiler/fspec.cc
++++ b/src/decompiler/fspec.cc
+@@ -4852,7 +4852,7 @@
+
+ {
+   int4 slot = op->numInput();
+-  Varnode *loadval = data.opStackLoad(spacebase,0,1,op,(Varnode *)0,false);
++  Varnode *loadval = data.opStackLoad(spacebase,0,1,op,(Varnode *)0,false,true);
+   data.opInsertInput(op,loadval,slot);
+   setStackPlaceholderSlot(slot);
+   loadval->setSpacebasePlaceholder();
+@@ -5171,7 +5171,9 @@
+     newinput[1+i] = vn;
+     activeinput.registerTrial(param->getAddress(),param->getSize());
+     activeinput.getTrial(i).markActive(); // Parameter is not optional
+-    if (noplacehold&&(param->getAddress().getSpace()->getType() == IPTR_SPACEBASE)) {
++    AddrSpace *paramSpace = param->getAddress().getSpace();
++    if (noplacehold && paramSpace->getType() == IPTR_SPACEBASE &&
++        (paramSpace != data.getArch()->getStackSpace() || data.getArch()->stackSegment.space == (AddrSpace *)0)) {
+       // We have a locked stack parameter, use it to recover the stack offset
+       vn->setSpacebasePlaceholder();
+       noplacehold = false;	// Only set this on the first parameter
+diff --git a/src/Processors/x86/data/languages/x86-16.cspec b/src/Processors/x86/data/languages/x86-16.cspec
+--- a/src/Processors/x86/data/languages/x86-16.cspec
++++ b/src/Processors/x86/data/languages/x86-16.cspec
+@@ -30,7 +30,7 @@
+   <global>
+     <range space="ram"/>
+   </global>
+-  <stackpointer register="SP" space="ram"/>
++  <stackpointer register="SP" space="ram" segmentregister="SS"/>
+   <default_proto>
+     <prototype name="__stdcall16near" extrapop="unknown" stackshift="2">
+       <input>
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -14,6 +14,7 @@
+  * limitations under the License.
+  */
+ #include "architecture.hh"
++#include "coreaction.hh"
+ #include "funcdata.hh"
+ #include "grammar.hh"
+ #include "libdecomp.hh"
+@@ -30,12 +31,16 @@
+   Architecture *arch;
+   Funcdata *fd;
+   BlockBasic *block;
+-  SegmentedEnvironment(void) {
++  bool hasFlow;
++  static void initialize(void) {
+     static bool initialized = false;
+     if (!initialized) {
+       startDecompilerLibrary(getenv("SLEIGHHOME"));
+       initialized = true;
+     }
++  }
++  SegmentedEnvironment(bool buildFlow = false) : hasFlow(buildFlow) {
++    initialize();
+     istringstream s("<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">cb</bytechunk></binaryimage>");
+     DocumentStorage store;
+     Document *doc = store.parseDocument(s);
+@@ -44,11 +49,17 @@
+     arch->init(store);
+     fd = arch->symboltab->getGlobalScope()->addFunction(Address(arch->getDefaultCodeSpace(),0x1000),"segmented_test")->getFunction();
+     fd->setHighLevel();
+-    block = new BlockBasic(fd);
++    if (hasFlow) {
++      fd->startProcessing();
++      block = (BlockBasic *)fd->getBasicBlocks().getBlock(0);
++    }
++    else
++      block = new BlockBasic(fd);
+   }
+   ~SegmentedEnvironment(void) {
+     delete arch;
+-    delete block;
++    if (!hasFlow)
++      delete block;
+   }
+   PcodeOp *op(OpCode code,const vector<Varnode *> &inputs,Datatype *outType = (Datatype *)0) {
+     PcodeOp *res = fd->newOp(inputs.size(),fd->getAddress());
+@@ -60,7 +71,10 @@
+       out->updateType(outType,true,true);
+       out->setImplied();
+     }
+-    fd->opInsertEnd(res,block);
++    if (hasFlow)
++      fd->opInsertBefore(res,block->lastOp());
++    else
++      fd->opInsertEnd(res,block);
+     return res;
+   }
+   Varnode *constant(int4 size,uintb value,Datatype *type = (Datatype *)0) {
+@@ -188,4 +202,176 @@
+   ASSERT(text.find("->second)") != string::npos);
+ }
+
++TEST(segmented_call_arguments) {
++  SegmentedEnvironment env(true);
++  AddrSpace *stack = env.arch->getStackSpace();
++  const VarnodeData &ss(env.arch->translate->getRegister("SS"));
++  ASSERT_EQUALS(env.arch->stackSegment.getAddr(),ss.getAddr());
++  // A changed selector must reach the call through data flow, without a CALL-address STORE.
++  PcodeOp *writeSelector = env.op(CPUI_COPY,{env.fd->newVarnode(2,env.arch->translate->getRegister("DS").getAddr())});
++  Varnode *selector = env.fd->newVarnodeOut(2,ss.getAddr(),writeSelector);
++  PcodeOp *call = env.op(CPUI_CALL,{env.fd->newVarnode(4,Address(stack->getContain(),0x2000))});
++  vector<Varnode *> initialArguments;
++  for(int4 displacement=4;displacement<=8;displacement+=2) {
++    Varnode *value = env.fd->opStackLoad(stack,displacement,2,call,(Varnode *)0,false);
++    initialArguments.push_back(value);
++    PcodeOp *load = value->getDef();
++    PcodeOp *segment = load->getIn(1)->getDef();
++    ASSERT_EQUALS(load->code(),CPUI_LOAD);
++    ASSERT_EQUALS(value->getSize(),2);
++    ASSERT_EQUALS(load->getIn(1)->getSize(),4);
++    ASSERT_EQUALS(segment->code(),CPUI_SEGMENTOP);
++    ASSERT_EQUALS(segment->getIn(1)->getAddr(),ss.getAddr());
++    ASSERT_EQUALS(segment->getIn(2)->getSize(),2);
++    ASSERT_EQUALS(segment->getIn(2)->getDef()->getIn(1)->getOffset(),displacement);
++  }
++  Varnode *wrapped = env.fd->opStackLoad(stack,4,2,call,env.constant(2,0xfffe),false);
++  PcodeOp *nearAdd = wrapped->getDef()->getIn(1)->getDef()->getIn(2)->getDef();
++  RuleCollapseConstants collapse("base");
++  ASSERT_EQUALS(nearAdd->getOut()->getSize(),2);
++  ASSERT_EQUALS(collapse.applyOp(nearAdd,*env.fd),1);
++  ASSERT_EQUALS(nearAdd->getIn(0)->getOffset(),2);
++
++  // Exercise actual heritage before and after late locked-prototype reconstruction.
++  env.fd->opHeritage();
++  for(int4 i=0;i<initialArguments.size();++i)
++    ASSERT_EQUALS(initialArguments[i]->getDef()->getIn(1)->getDef()->getIn(1),selector);
++  FuncCallSpecs spec(call);
++  spec.setInternal(env.arch->getModel("__cdecl16far"),env.arch->types->getTypeVoid());
++  spec.initActiveInput();
++  spec.createPlaceholder(*env.fd,stack);
++  Varnode *placeholder = call->getIn(spec.getStackPlaceholderSlot());
++  Varnode *stackref = placeholder->getDef()->getIn(1);
++  ASSERT_EQUALS(stackref->getSize(),2);
++  ASSERT_EQUALS(stackref->getDef()->code(),CPUI_INT_ADD);
++  istringstream declaration("void __cdecl16far late_fill(uint2 destination,uint2 count,uint2 value);");
++  PrototypePieces pieces;
++  parse_protopieces(pieces,declaration,env.arch);
++  FuncProto prototype;
++  prototype.setInternal(pieces.model,env.arch->types->getTypeVoid());
++  prototype.setPieces(pieces);
++  spec.forceSet(*env.fd,prototype);
++  ASSERT_EQUALS(call->numInput(),5);
++  ASSERT_EQUALS(spec.getStackPlaceholderSlot(),4);
++  ASSERT_EQUALS(call->getIn(4),placeholder);
++  env.fd->opHeritage();
++  for(int4 slot=1;slot<=3;++slot) {
++    Varnode *argument = call->getIn(slot);
++    ASSERT(!argument->isSpacebasePlaceholder());
++    PcodeOp *segment = argument->getDef()->getIn(1)->getDef();
++    ASSERT_EQUALS(segment->code(),CPUI_SEGMENTOP);
++    ASSERT_EQUALS(segment->getIn(1),selector);
++    ASSERT_EQUALS(segment->getIn(2)->getSize(),2);
++    ASSERT_EQUALS(segment->getIn(2)->getDef()->getIn(0),stackref);
++  }
++}
++
++
++TEST(segmented_call_unknown_selector) {
++  SegmentedEnvironment env(true);
++  AddrSpace *stack = env.arch->getStackSpace();
++  const VarnodeData &ss(env.arch->stackSegment);
++  PcodeOp *call = env.op(CPUI_CALL,{env.fd->newVarnode(4,Address(stack->getContain(),0x2000))});
++  Varnode *value = env.fd->opStackLoad(stack,4,2,call,(Varnode *)0,false);
++  env.fd->opInsertInput(call,value,1);
++  env.fd->opHeritage();
++  Varnode *selector = value->getDef()->getIn(1)->getDef()->getIn(1);
++  ASSERT(!selector->isConstant());
++  ASSERT(selector->isInput());
++  ASSERT_EQUALS(selector->getAddr(),ss.getAddr());
++  ASSERT_EQUALS(selector->getSize(),2);
++}
++
++// These retained bytes are the original SCRANTIC NE1 fill body/wrapper and the observed JMP/CALL_RETURN regression from segmented-c.xml.
++TEST(segmented_call_bytes) {
++  SegmentedEnvironment::initialize();
++  istringstream image(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
++<bytechunk space="ram" offset="0x100011f2" readonly="true">
++45558bec571e078b7e068b4e088a460a8ae0fcf7c701007404e309aa49d1e9f3ab7301aa5f5d4dcb
++45558bec568b76068a460850ff760a560ee8c4ff83c4068bc65e5d4dcb
++</bytechunk>
++<bytechunk space="ram" offset="0x10001000" readonly="true">e90d00</bytechunk>
++<bytechunk space="ram" offset="0x10001010" readonly="true">558bec8b46065dcb</bytechunk>
++</binaryimage>)");
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  AddrSpace *ram = arch->getDefaultCodeSpace();
++  Scope *global = arch->symboltab->getGlobalScope();
++  global->addFunction(Address(ram,0x100011f2),"fill_body");
++  Funcdata *wrapper = global->addFunction(Address(ram,0x1000121a),"fill_wrapper")->getFunction();
++  global->addFunction(Address(ram,0x10001010),"jump_target");
++  Funcdata *thunk = global->addFunction(Address(ram,0x10001000),"jump_thunk")->getFunction();
++  const char *declarations[] = {
++    "extern uint2 __cdecl16far fill_body(uint2 destination,uint2 count,uint2 value);",
++    "extern uint2 __cdecl16far fill_wrapper(uint2 destination,uint2 value,uint2 count);",
++    "extern uint2 __cdecl16far jump_target(uint2 value);",
++    "extern uint2 __cdecl16far jump_thunk(uint2 value);"
++  };
++  for(int4 i=0;i<4;++i) {
++    istringstream declaration(declarations[i]);
++    parse_C(arch.get(),declaration);
++  }
++  arch->allacts.getCurrent()->reset(*wrapper);
++  ASSERT(arch->allacts.getCurrent()->perform(*wrapper) >= 0);
++  ASSERT_EQUALS(wrapper->numCalls(),1);
++  FuncCallSpecs *spec = wrapper->getCallSpecs(0);
++  ASSERT_EQUALS(spec->getEntryAddress(),Address(ram,0x100011f2));
++  PcodeOp *call = spec->getOp();
++  ASSERT_EQUALS(call->numInput(),4);
++  for(int4 slot=1;slot<=3;++slot) {
++    Varnode *argument = call->getIn(slot);
++    ASSERT_EQUALS(argument->getSize(),2);
++    ASSERT_EQUALS(argument->getDef()->code(),CPUI_LOAD);
++    Varnode *address = argument->getDef()->getIn(1);
++    ASSERT_EQUALS(address->getSize(),4);
++    if (address->getDef()->code() == CPUI_CAST)
++      address = address->getDef()->getIn(0);
++    ASSERT_EQUALS(address->getDef()->code(),CPUI_SEGMENTOP);
++    Varnode *near = address->getDef()->getIn(2);
++    ASSERT_EQUALS(near->getSize(),2);
++    ASSERT_EQUALS(near->getDef()->code(),CPUI_PTRSUB);
++    ASSERT_EQUALS(near->getDef()->getIn(1)->getOffset(),0xfff4 + slot * 2);
++    Varnode *selector = address->getDef()->getIn(1);
++    ASSERT(selector->isInput());
++    ASSERT_EQUALS(selector->getAddr(),arch->stackSegment.getAddr());
++  }
++  ostringstream output;
++  arch->print->setOutputStream(&output);
++  arch->print->setMaxLineSize(300);
++  arch->print->docFunction(wrapper);
++  string text = output.str();
++  ASSERT(text.find("fill_body(*(uint2 *)(xunknown1 *)segmentop(unaff_SS, &stack0xfff6), *(uint2 *)(xunknown1 *)segmentop(unaff_SS, &stack0xfff8), *(uint2 *)(xunknown1 *)segmentop(unaff_SS, &stack0xfffa))") != string::npos);
++  ASSERT(text.find("in_stack_0000fff6") == string::npos);
++  ASSERT(text.find("in_stack_0000fff8") == string::npos);
++  ASSERT(text.find("in_stack_0000fffa") == string::npos);
++  // Re-analyze the observed JMP with the native flow override, without a machine CALL stack write.
++  arch->allacts.getCurrent()->reset(*thunk);
++  ASSERT(arch->allacts.getCurrent()->perform(*thunk) >= 0);
++  thunk->getOverride().insertFlowOverride(Address(ram,0x10001000),"callreturn");
++  arch->clearAnalysis(thunk);
++  arch->allacts.getCurrent()->reset(*thunk);
++  ASSERT(arch->allacts.getCurrent()->perform(*thunk) >= 0);
++  ASSERT_EQUALS(thunk->numCalls(),1);
++  call = thunk->getCallSpecs(0)->getOp();
++  ASSERT_EQUALS(call->getAddr(),Address(ram,0x10001000));
++  ASSERT_EQUALS(thunk->getCallSpecs(0)->getEntryAddress(),Address(ram,0x10001010));
++  ASSERT_EQUALS(call->numInput(),2);
++  ASSERT_EQUALS(call->getIn(1)->getDef()->code(),CPUI_LOAD);
++  Varnode *address = call->getIn(1)->getDef()->getIn(1);
++  if (address->getDef()->code() == CPUI_CAST)
++    address = address->getDef()->getIn(0);
++  PcodeOp *segment = address->getDef();
++  ASSERT_EQUALS(segment->code(),CPUI_SEGMENTOP);
++  ASSERT_EQUALS(segment->getIn(1)->getAddr(),arch->stackSegment.getAddr());
++  ASSERT(segment->getIn(1)->isInput());
++  output.str("");
++  arch->print->docFunction(thunk);
++  text = output.str();
++  ASSERT(text.find("jump_target(*(uint2 *)segmentop(unaff_SS, &value))") != string::npos);
++  arch->print->setOutputStream((ostream *)0);
++}
++
+ } // End namespace ghidra
