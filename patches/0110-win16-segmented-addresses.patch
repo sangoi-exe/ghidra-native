@@ -1,0 +1,332 @@
+diff --git a/src/decompiler/funcdata_op.cc b/src/decompiler/funcdata_op.cc
+index bf79e64..d9ca63c 100644
+--- a/src/decompiler/funcdata_op.cc
++++ b/src/decompiler/funcdata_op.cc
+@@ -478,20 +478,7 @@ Varnode *Funcdata::createStackRef(AddrSpace *spc,uintb off,PcodeOp *op,Varnode *
+   else
+     opInsertBefore(addop,op);
+ 
+-  AddrSpace *containerid = spc->getContain();
+-  SegmentOp *segdef = glb->userops.getSegmentOp(containerid->getIndex());
+-
+-  if (segdef != (SegmentOp *)0) {
+-    PcodeOp *segop = newOp(3,op->getAddr());
+-    opSetOpcode(segop,CPUI_SEGMENTOP);
+-    Varnode *segout = newUniqueOut(containerid->getAddrSize(),segop);
+-    opSetInput(segop,newVarnodeSpace(containerid),0);
+-    opSetInput(segop,newConstant(segdef->getBaseSize(),0),1);
+-    opSetInput(segop,addout,2);
+-    opInsertAfter(segop,addop); // Make sure -segop- comes after -addop- regardless if before/after -op-
+-    addout = segout;
+-  }
+-
++  // This is an abstract reference into the spacebase space, not a machine segmented address. Keep the native spacebase offset so LOAD/STORE normalization can recover the stack location without inventing a selector.
+   return addout;
+ }
+ 
+diff --git a/src/decompiler/heritage.cc b/src/decompiler/heritage.cc
+index 0f73153..ee97fed 100644
+--- a/src/decompiler/heritage.cc
++++ b/src/decompiler/heritage.cc
+@@ -1036,7 +1036,16 @@ bool Heritage::discoverIndexedStackPointers(AddrSpace *spc,vector<PcodeOp *> &fr
+ 	case CPUI_SEGMENTOP:
+ 	{
+ 	  if (op->getIn(2) != curNode.vn) break;	// Check that stackpointer comes in as inner pointer
+-	  // Treat output as having the same offset, fallthru to COPY
++	  // The selector prevents this from being a known stack offset. Retain the possible stack alias, but guard accesses just as for an unknown index.
++	  StackNode nextNode(outVn,curNode.offset,curNode.traversals | StackNode::nonconstant_index);
++	  if (nextNode.iter != nextNode.vn->endDescend()) {
++	    outVn->setMark();
++	    path.push_back(nextNode);
++	    markedVn.push_back(outVn);
++	  }
++	  else if (outVn->getSpace()->getType() == IPTR_SPACEBASE)
++	    unknownStackStorage = true;
++	  break;
+ 	}
+ 	case CPUI_INDIRECT:
+ 	case CPUI_COPY:
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+index f0d530d..25c8310 100644
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -358,12 +358,6 @@ bool PrintC::checkArrayDeref(const Varnode *vn) const
+   if (!vn->isImplied()) return false;
+   if (!vn->isWritten()) return false;
+   op = vn->getDef();
+-  if (op->code()==CPUI_SEGMENTOP) {
+-    vn = op->getIn(2);
+-    if (!vn->isImplied()) return false;
+-    if (!vn->isWritten()) return false;
+-    op = vn->getDef();
+-  }
+   if ((op->code()!=CPUI_PTRSUB)&&(op->code()!=CPUI_PTRADD)) return false;
+   return true;
+ }
+@@ -1161,15 +1155,23 @@ void PrintC::opPtrsub(const PcodeOp *op)
+   }
+ }
+ 
+-/// - slot 0 is the spaceid constant
+-/// - slot 1 is the segment, we could conceivably try to annotate the segment here
+-/// - slot 2 is the pointer we are really interested in printing
++/// Emit an analysis address expression retaining both the selector and the offset. Any LOAD or STORE must dereference the result, not the offset argument. This notation does not resolve a runtime selector.
+ ///
+ /// \param op is the SEGMENTOP PcodeOp
+ void PrintC::opSegmentOp(const PcodeOp *op)
+ 
+ {
+-  pushVn(op->getIn(2),op,mods);
++  uint4 m = mods & ~(print_load_value | print_store_value);
++  Datatype *dt = op->getOut()->getHighTypeDefFacing();
++  if (!option_nocasts && dt->getMetatype() == TYPE_PTR) {
++    pushOp(&typecast,op);
++    pushType(dt);
++  }
++  pushOp(&function_call,op);
++  pushAtom(Atom(op->getOpcode()->getOperatorName(op),optoken,EmitMarkup::no_color,op));
++  pushOp(&comma,op);
++  pushVn(op->getIn(2),op,m);
++  pushVn(op->getIn(1),op,m);
+ }
+ 
+ void PrintC::opCpoolRefOp(const PcodeOp *op)
+diff --git a/src/decompiler/ruleaction.cc b/src/decompiler/ruleaction.cc
+index a9db3b8..1936047 100644
+--- a/src/decompiler/ruleaction.cc
++++ b/src/decompiler/ruleaction.cc
+@@ -4262,19 +4262,9 @@ AddrSpace *RuleLoadVarnode::checkSpacebase(Architecture *glb,PcodeOp *op,uintb &
+ 
+   offvn = op->getIn(1);		// Address offset
+   loadspace = op->getIn(0)->getSpaceFromConst(); // Space being loaded/stored
+-  // Treat segmentop as part of load/store
++  // A segmented address is not a spacebase offset: its selector is an independent dependency, even when the offset is based on the stack pointer. RuleSegment handles constant addresses.
+   if (offvn->isWritten()&&(offvn->getDef()->code()==CPUI_SEGMENTOP)) {
+-    offvn = offvn->getDef()->getIn(2);
+-    // If we are looking for a spacebase (i.e. stackpointer)
+-    // Then currently we COMPLETELY IGNORE the base part of the
+-    // segment. We assume it is all correct.
+-    // If the segmentop inner is constant, we are NOT looking
+-    // for a spacebase, and we do not igore the base. If the
+-    // base is also constant, we let RuleSegmentOp reduce
+-    // the whole segmentop to a constant.  If the base
+-    // is not constant, we are not ready for a fixed address.
+-    if (offvn->isConstant())
+-      return (AddrSpace *)0;
++    return (AddrSpace *)0;
+   }
+   else if (offvn->isConstant()) { // Check for constant
+     offoff = offvn->getOffset();
+diff --git a/src/decompiler/userop.hh b/src/decompiler/userop.hh
+index fda329a..6be1aba 100644
+--- a/src/decompiler/userop.hh
++++ b/src/decompiler/userop.hh
+@@ -253,10 +253,7 @@ public:
+ ///    - the \b base or \b segment and
+ ///    - the high-level \b near pointer
+ ///
+-/// High-level analysis can ignore the base/segment and any
+-/// normalization on the near pointer.
+-/// Emitted expressions involving \b this segment op prints only the \b near portion.
+-/// Data-type information propagates only through this high-level side.
++/// Data-type information propagates through the high-level near pointer. Emitted C address expressions retain both the base/segment and the near portion; a LOAD or STORE dereferences the resulting address.
+ ///
+ /// The decompiler looks for the term-tree defined in SegmentOp
+ /// and replaces it with the SEGMENTOP operator in any p-code it analyzes.
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+new file mode 100644
+index 0000000..16c8d6d
+--- /dev/null
++++ b/src/unittests/testsegmented.cc
+@@ -0,0 +1,191 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#include "architecture.hh"
++#include "funcdata.hh"
++#include "grammar.hh"
++#include "libdecomp.hh"
++#include "printc.hh"
++#include "printjava.hh"
++#include "ruleaction.hh"
++#include "test.hh"
++
++namespace ghidra {
++
++// These local owner tests exercise native-generated stack references and printer sugar, which cannot be specified by instruction bytes alone.
++class SegmentedEnvironment {
++public:
++  Architecture *arch;
++  Funcdata *fd;
++  BlockBasic *block;
++  SegmentedEnvironment(void) {
++    static bool initialized = false;
++    if (!initialized) {
++      startDecompilerLibrary(getenv("SLEIGHHOME"));
++      initialized = true;
++    }
++    istringstream s("<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">cb</bytechunk></binaryimage>");
++    DocumentStorage store;
++    Document *doc = store.parseDocument(s);
++    store.registerTag(doc->getRoot());
++    arch = ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout);
++    arch->init(store);
++    fd = arch->symboltab->getGlobalScope()->addFunction(Address(arch->getDefaultCodeSpace(),0x1000),"segmented_test")->getFunction();
++    fd->setHighLevel();
++    block = new BlockBasic(fd);
++  }
++  ~SegmentedEnvironment(void) {
++    delete arch;
++    delete block;
++  }
++  PcodeOp *op(OpCode code,const vector<Varnode *> &inputs,Datatype *outType = (Datatype *)0) {
++    PcodeOp *res = fd->newOp(inputs.size(),fd->getAddress());
++    fd->opSetOpcode(res,code);
++    for(int4 i=0;i<inputs.size();++i)
++      fd->opSetInput(res,inputs[i],i);
++    if (outType != (Datatype *)0) {
++      Varnode *out = fd->newUniqueOut(outType->getSize(),res);
++      out->updateType(outType,true,true);
++      out->setImplied();
++    }
++    fd->opInsertEnd(res,block);
++    return res;
++  }
++  Varnode *constant(int4 size,uintb value,Datatype *type = (Datatype *)0) {
++    Varnode *vn = fd->newConstant(size,value);
++    if (type != (Datatype *)0)
++      vn->updateType(type,true,true);
++    return vn;
++  }
++  Varnode *segment(Varnode *selector,Varnode *offset,Datatype *type) {
++    return op(CPUI_SEGMENTOP,{fd->newVarnodeSpace(arch->getDefaultDataSpace()),selector,offset},type)->getOut();
++  }
++};
++
++template<typename Printer> class SegmentedExpressionPrinter : public Printer {
++public:
++  SegmentedExpressionPrinter(Architecture *arch) : Printer(arch) {
++    this->initializeFromArchitecture();
++  }
++  string expression(const PcodeOp *op) {
++    ostringstream output;
++    this->clear();
++    this->setOutputStream(&output);
++    op->getOpcode()->push(this,op,(const PcodeOp *)0);
++    this->recurse();
++    this->emit->flush();
++    this->setOutputStream((ostream *)0);
++    return output.str();
++  }
++};
++
++TEST(segmented_spacebase) {
++  SegmentedEnvironment env;
++  AddrSpace *stack = env.arch->getStackSpace();
++  Varnode *sp = env.fd->constructSpacebaseInput(stack);
++  Datatype *word = env.arch->types->getBase(2,TYPE_UNKNOWN);
++  PcodeOp *anchor = env.op(CPUI_COPY,{env.constant(2,0)},word);
++  Varnode *offset = env.fd->createStackRef(stack,0x10,anchor,sp,false);
++  ASSERT_EQUALS(offset->getSize(),sp->getSize());
++  ASSERT_EQUALS(offset->getDef()->code(),CPUI_INT_ADD);
++  PcodeOp *load = env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(stack->getContain()),offset},word);
++  RuleLoadVarnode loadRule("base");
++  ASSERT_EQUALS(loadRule.applyOp(load,*env.fd),1);
++  ASSERT_EQUALS(load->code(),CPUI_COPY);
++  ASSERT_EQUALS(load->getIn(0)->getSpace(),stack);
++  ASSERT_EQUALS(load->getIn(0)->getOffset(),0x10);
++  Varnode *stackValue = env.fd->opStackLoad(stack,0x14,4,anchor,sp,false);
++  PcodeOp *stackLoad = stackValue->getDef();
++  ASSERT_EQUALS(stackValue->getSize(),4);
++  ASSERT_EQUALS(stackLoad->getIn(1)->getSize(),2);
++  ASSERT_EQUALS(loadRule.applyOp(stackLoad,*env.fd),1);
++  ASSERT_EQUALS(stackLoad->getIn(0)->getSpace(),stack);
++  ASSERT_EQUALS(stackLoad->getIn(0)->getOffset(),0x14);
++  PcodeOp *store = env.fd->opStackStore(stack,0x12,anchor,false);
++  env.fd->opSetInput(store,env.constant(2,0xaabb),2);
++  PcodeOp *storeOffset = store->getIn(1)->getDef();
++  // Bind the newly generated free SP reference as heritage does before normalization.
++  env.fd->opSetInput(storeOffset,env.fd->setInputVarnode(storeOffset->getIn(0)),0);
++  RuleStoreVarnode storeRule("base");
++  ASSERT_EQUALS(storeRule.applyOp(store,*env.fd),1);
++  ASSERT_EQUALS(store->getOut()->getSpace(),stack);
++  ASSERT_EQUALS(store->getOut()->getOffset(),0x12);
++  // A genuine literal-zero selector is not a synthetic stack reference.
++  Varnode *address = env.segment(env.constant(2,0),offset,env.arch->types->getBase(4,TYPE_UNKNOWN));
++  PcodeOp *realLoad = env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(stack->getContain()),address},word);
++  ASSERT_EQUALS(loadRule.applyOp(realLoad,*env.fd),0);
++  PcodeOp *realStore = env.op(CPUI_STORE,{env.fd->newVarnodeSpace(stack->getContain()),address,env.constant(2,1)});
++  ASSERT_EQUALS(storeRule.applyOp(realStore,*env.fd),0);
++  ASSERT_EQUALS(realLoad->code(),CPUI_LOAD);
++  ASSERT_EQUALS(realStore->code(),CPUI_STORE);
++  // The processor-owned constant address calculation still folds normally.
++  PcodeOp *fixed = env.segment(env.constant(2,0x1234),env.constant(2,0x50),env.arch->types->getBase(4,TYPE_UNKNOWN))->getDef();
++  RuleSegment segmentRule("base");
++  ASSERT_EQUALS(segmentRule.applyOp(fixed,*env.fd),1);
++  ASSERT_EQUALS(fixed->code(),CPUI_COPY);
++  ASSERT_EQUALS(fixed->getIn(0)->getOffset(),0x12340050);
++}
++
++TEST(segmented_array_address) {
++  SegmentedEnvironment env;
++  Datatype *word = env.arch->types->getBase(2,TYPE_UNKNOWN);
++  Datatype *nearPtr = env.arch->types->getTypePointer(2,word,1);
++  Datatype *farPtr = env.arch->types->getTypePointer(4,word,1);
++  Varnode *offset = env.op(CPUI_PTRADD,{env.constant(2,0x1000,nearPtr),env.constant(2,3),env.constant(2,2)},nearPtr)->getOut();
++  Varnode *address = env.segment(env.constant(2,0x1234),offset,farPtr);
++  PcodeOp *load = env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(env.arch->getDefaultDataSpace()),address},word);
++  SegmentedExpressionPrinter<PrintC> printer(env.arch);
++  string text = printer.expression(load);
++  ASSERT_EQUALS(text.substr(0,31),"*(xunknown2 *)segmentop(0x1234,");
++  ASSERT(text.find(" + 3)") != string::npos);
++  ASSERT(text.find('[') == string::npos);
++  PcodeOp *store = env.op(CPUI_STORE,{env.fd->newVarnodeSpace(env.arch->getDefaultDataSpace()),address,env.constant(2,7)});
++  text = printer.expression(store);
++  ASSERT(text.find("*(xunknown2 *)segmentop(0x1234,") == 0);
++  ASSERT(text.find(" = 7") != string::npos);
++  text = printer.expression(address->getDef());
++  ASSERT(text.find("(xunknown2 *)segmentop(0x1234,") == 0);
++  ASSERT(text.find('[') == string::npos);
++  // Nonsegmented C array access, and the Java follower's own array notation, remain values rather than addresses.
++  PcodeOp *plainLoad = env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(env.arch->getDefaultDataSpace()),offset},word);
++  text = printer.expression(plainLoad);
++  ASSERT(text.find("[3]") != string::npos);
++  ASSERT(text.find("segmentop") == string::npos);
++  SegmentedExpressionPrinter<PrintJava> javaPrinter(env.arch);
++  text = javaPrinter.expression(plainLoad);
++  ASSERT(text.find("[3]") != string::npos);
++  ASSERT(text.find("segmentop") == string::npos);
++}
++
++TEST(segmented_member_address) {
++  SegmentedEnvironment env;
++  istringstream declaration("struct SegmentedRecord { int2 first; int2 second; }");
++  string name;
++  Datatype *record = parse_type(declaration,name,env.arch);
++  Datatype *nearPtr = env.arch->types->getTypePointer(2,record,1);
++  Datatype *word = env.arch->types->getBase(2,TYPE_INT);
++  Datatype *nearWord = env.arch->types->getTypePointer(2,word,1);
++  Datatype *farWord = env.arch->types->getTypePointer(4,word,1);
++  Varnode *offset = env.op(CPUI_PTRSUB,{env.constant(2,0x1000,nearPtr),env.constant(2,2)},nearWord)->getOut();
++  Varnode *address = env.segment(env.constant(2,0x1234),offset,farWord);
++  PcodeOp *load = env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(env.arch->getDefaultDataSpace()),address},word);
++  SegmentedExpressionPrinter<PrintC> printer(env.arch);
++  string text = printer.expression(load);
++  ASSERT(text.find("*(int2 *)segmentop(0x1234,") == 0);
++  ASSERT(text.find('&') != string::npos);
++  ASSERT(text.find("->second)") != string::npos);
++}
++
++} // End namespace ghidra

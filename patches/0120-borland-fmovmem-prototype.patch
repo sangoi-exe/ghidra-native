@@ -1,0 +1,46 @@
+diff --git a/src/Processors/x86/data/languages/x86-16.cspec b/src/Processors/x86/data/languages/x86-16.cspec
+index f07cea0..57978c9 100644
+--- a/src/Processors/x86/data/languages/x86-16.cspec
++++ b/src/Processors/x86/data/languages/x86-16.cspec
+@@ -134,6 +134,41 @@
+       <register name="DF"/>
+     </unaffected>
+   </prototype>
++  <!-- Whole-family-qualified fmovmem; low16 ordinary intact-frame analysis, not a host-pointer ABI. -->
++  <prototype name="borland_fmovmem_16far" extrapop="4" stackshift="4">
++    <input>
++      <pentry minsize="4" maxsize="4"><addr offset="4" space="stack"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr offset="8" space="stack"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr offset="12" space="stack"/></pentry>
++    </input>
++    <!-- Native output anchor only; matched core has an explicit void analysis return. -->
++    <output><pentry minsize="2" maxsize="2"><register name="AX"/></pentry></output>
++    <!-- These are low-16-bit preservation claims for ordinary intact-frame completion. -->
++    <unaffected>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="SS"/>
++      <register name="CS"/>
++    </unaffected>
++    <!-- Conservative clobbers, not computed register/flag results or memory effects. -->
++    <killedbycall>
++      <register name="BX"/>
++      <register name="AX"/>
++      <register name="DX"/>
++      <register name="CX"/>
++      <register name="ES"/>
++      <register name="DF"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
+   <prototype name="__regcall" extrapop="2" stackshift="2">
+     <input>
+       <pentry minsize="1" maxsize="2">

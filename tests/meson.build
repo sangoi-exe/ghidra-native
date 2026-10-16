@@ -2,8 +2,22 @@ decompiler_test = executable('decompiler_test',
   'main.cc',
   '../src/unittests/paramactive.cc',
   '../src/unittests/pcodeinject.cc',
+  '../src/unittests/testsegmented.cc',
+  '../src/decompiler/xml_arch.cc',
+  '../src/decompiler/loadimage_xml.cc',
   include_directories: incs,
   dependencies: zlib,
-  link_with: [ghidra_base_static, ghidra_decompiler_static, slgh_static])
+  link_with: [ghidra_base_static, ghidra_decompiler_static, slgh_static, libdecomp_static])
 
-test('ghidra-native-unittests', decompiler_test)
+x86_languages = processor_dir / 'x86' / 'data' / 'languages'
+foreach spec : ['x86.ldefs', 'x86-16.pspec', 'x86-16.cspec']
+  configure_file(input: x86_languages / spec, output: spec, copy: true)
+endforeach
+x86_test_sla = custom_target('x86-test-sla',
+  input: x86_languages / 'x86.slaspec',
+  output: 'x86.sla',
+  command: [sleighc_exe, '@INPUT@', '@OUTPUT@'])
+
+test('ghidra-native-unittests', decompiler_test,
+  depends: x86_test_sla,
+  env: ['SLEIGHHOME=' + meson.current_build_dir()])
