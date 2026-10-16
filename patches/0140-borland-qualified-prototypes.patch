@@ -1,0 +1,463 @@
+diff --git a/src/Processors/x86/data/languages/x86-16.cspec b/src/Processors/x86/data/languages/x86-16.cspec
+--- a/src/Processors/x86/data/languages/x86-16.cspec
++++ b/src/Processors/x86/data/languages/x86-16.cspec
+@@ -169,6 +169,298 @@
+       <register name="OF"/>
+     </killedbycall>
+   </prototype>
++  <!-- Analysis model for the qualified 28-byte helper, not a general Borland compiler ABI. -->
++  <prototype name="borland_f_scopy_16far" extrapop="12" stackshift="4">
++    <input>
++      <pentry minsize="2" maxsize="2"><register name="CX"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr offset="4" space="stack"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr offset="8" space="stack"/></pentry>
++    </input>
++    <!-- No manufactured AX/DX result. This does not recover a historical C return type. -->
++    <output/>
++    <unaffected>
++      <register name="AX"/>
++      <register name="BX"/>
++      <register name="DX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="SS"/>
++      <register name="CS"/>
++    </unaffected>
++    <!-- Clobber declarations do not express the computed ES, CX, or DF values. -->
++    <killedbycall>
++      <register name="CX"/>
++      <register name="ES"/>
++      <register name="DF"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Analysis model for the qualified 38-byte body, not a general Borland or host-pointer ABI. -->
++  <prototype name="borland_far_copy_16far" extrapop="4" stackshift="4">
++    <input>
++      <pentry minsize="4" maxsize="4"><addr offset="4" space="stack"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr offset="8" space="stack"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr offset="12" space="stack"/></pentry>
++    </input>
++    <output>
++      <!-- Native join anchoring; matched functions explicitly return the full four-byte record. -->
++      <pentry minsize="2" maxsize="2"><register name="AX"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr space="join" piece1="DX" piece2="AX"/></pentry>
++    </output>
++    <!-- These are low-16-bit preservation claims for ordinary intact-frame completion. -->
++    <unaffected>
++      <register name="BX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="SS"/>
++      <register name="CS"/>
++    </unaffected>
++    <!-- This does not compute CX=0, ES, DF=0, count-parity CF, or DEC BP flags. -->
++    <killedbycall>
++      <register name="AX"/>
++      <register name="DX"/>
++      <register name="CX"/>
++      <register name="ES"/>
++      <register name="DF"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Exact qualified F_PCMP body only; native analysis tuple, not historical C or flat-pointer equality. -->
++  <prototype name="borland_far_pointer_compare_16far" extrapop="4" stackshift="4">
++    <input>
++      <pentry minsize="2" maxsize="2"><register name="AX"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr space="join" piece1="DX" piece2="AX"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="BX"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr space="join" piece1="CX" piece2="BX"/></pentry>
++    </input>
++    <output>
++      <!-- Native ParamEntry joins must overlap a preceding storage entry. -->
++      <pentry minsize="1" maxsize="1"><register name="ZF"/></pentry>
++      <pentry minsize="9" maxsize="9"><addr space="join" piece1="CX" piece2="BX" piece3="DX" piece4="AX" piece5="ZF"/></pentry>
++    </output>
++    <unaffected>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="ES"/>
++      <register name="SS"/>
++      <register name="CS"/>
++      <register name="DF"/>
++    </unaffected>
++    <!-- Full body computes the selected CMP flags; this prototype retains only consumed ZF. -->
++    <killedbycall>
++      <register name="AX"/>
++      <register name="DX"/>
++      <register name="BX"/>
++      <register name="CX"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Whole-family-qualified fmemmove; low16 ordinary intact-frame analysis, not a host-pointer ABI. -->
++  <prototype name="borland_fmemmove_16far" extrapop="4" stackshift="4">
++    <input>
++      <pentry minsize="4" maxsize="4"><addr offset="4" space="stack"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr offset="8" space="stack"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr offset="12" space="stack"/></pentry>
++    </input>
++    <output>
++      <!-- Native join anchoring; matched functions explicitly return the full four-byte record. -->
++      <pentry minsize="2" maxsize="2"><register name="AX"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr space="join" piece1="DX" piece2="AX"/></pentry>
++    </output>
++    <!-- These are low-16-bit preservation claims for ordinary intact-frame completion. -->
++    <unaffected>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="SS"/>
++      <register name="CS"/>
++    </unaffected>
++    <!-- Conservative clobbers, not computed register/flag results or memory effects. -->
++    <killedbycall>
++      <register name="BX"/>
++      <register name="AX"/>
++      <register name="DX"/>
++      <register name="CX"/>
++      <register name="ES"/>
++      <register name="DF"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Analysis model for this complete wrapper with its separately qualified internal target. -->
++  <prototype name="borland_memset_16far" extrapop="4" stackshift="4">
++    <input>
++      <pentry minsize="2" maxsize="2"><addr offset="4" space="stack"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr offset="6" space="stack"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr offset="8" space="stack"/></pentry>
++    </input>
++    <!-- Current SI is moved to AX before restoring SI; a WORD, never a host pointer. -->
++    <output><pentry minsize="2" maxsize="2"><register name="AX"/></pentry></output>
++    <!-- Conditional on the evidenced inner body and ordinary intact frames/accesses. -->
++    <unaffected>
++      <register name="BX"/>
++      <register name="DX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="SS"/>
++      <register name="CS"/>
++    </unaffected>
++    <!-- Does not compute current-SI AX, CX=0, ES=DS, DF=0, ADD/DEC flags, or fill effects. -->
++    <killedbycall>
++      <register name="AX"/>
++      <register name="CX"/>
++      <register name="ES"/>
++      <register name="DF"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Analysis model for this complete internal body, not a general compiler or host memset ABI. -->
++  <prototype name="borland_setmem_16far" extrapop="4" stackshift="4">
++    <input>
++      <pentry minsize="2" maxsize="2"><addr offset="4" space="stack"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr offset="6" space="stack"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr offset="8" space="stack"/></pentry>
++    </input>
++    <output><pentry minsize="2" maxsize="2"><register name="AX"/></pentry></output>
++    <!-- Low16 preservation, conditional on ordinary intact-frame completion; not arbitrary aliases. -->
++    <unaffected>
++      <register name="BX"/>
++      <register name="DX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="SS"/>
++      <register name="CS"/>
++    </unaffected>
++    <!-- Does not compute duplicated-byte AX, CX=0, ES=DS, DF=0, flags, or memory effects. -->
++    <killedbycall>
++      <register name="AX"/>
++      <register name="CX"/>
++      <register name="ES"/>
++      <register name="DF"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Complete qualified DX:AX/CL far cores, not a general Borland ABI or an out-of-range shift fixup. -->
++  <prototype name="borland_word_shift_16far" extrapop="4" stackshift="4">
++    <input>
++      <!-- Native least-significant-piece anchor; functions explicitly use the full join. -->
++      <pentry minsize="2" maxsize="2"><register name="AX"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr space="join" piece1="DX" piece2="AX"/></pentry>
++      <pentry minsize="1" maxsize="1"><register name="CL"/></pentry>
++    </input>
++    <output>
++      <pentry minsize="2" maxsize="2"><register name="AX"/></pentry>
++      <pentry minsize="4" maxsize="4"><addr space="join" piece1="DX" piece2="AX"/></pentry>
++    </output>
++    <unaffected>
++      <register name="CH"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="ES"/>
++      <register name="SS"/>
++      <register name="CS"/>
++      <register name="SP"/>
++    </unaffected>
++    <!-- CL's path-local final value is documented, not computed by this prototype. -->
++    <killedbycall>
++      <register name="AX"/>
++      <register name="DX"/>
++      <register name="BX"/>
++      <register name="CL"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Exact qualified TLINK4.01/5.1 near writer only; analysis storage, not a historical C ABI. -->
++  <prototype name="tlink_writer_state_16near" extrapop="2" stackshift="2">
++    <input>
++      <pentry minsize="2" maxsize="2"><register name="BX"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="CX"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="DX"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="DS"/></pentry>
++    </input>
++    <output>
++      <!-- Native ParamEntry joins must overlap a preceding storage entry. -->
++      <pentry minsize="1" maxsize="1"><register name="CF"/></pentry>
++      <pentry minsize="7" maxsize="7"><addr space="join" piece1="ES" piece2="CX" piece3="DX" piece4="CF"/></pentry>
++    </output>
++    <!-- Low16 preservation on ordinary completion with intact selected memory/stack views. -->
++    <unaffected>
++      <register name="AX"/>
++      <register name="BX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="SS"/>
++      <register name="CS"/>
++      <register name="DF"/>
++    </unaffected>
++    <killedbycall>
++      <register name="CX"/>
++      <register name="DX"/>
++      <register name="ES"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
+   <prototype name="__regcall" extrapop="2" stackshift="2">
+     <input>
+       <pentry minsize="1" maxsize="2">
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -374,4 +374,157 @@
+   arch->print->setOutputStream((ostream *)0);
+ }
+
++// Storage tests for source-qualified helpers only; no generic Borland ABI, flag computation, or arbitrary caller propagation is implied.
++class QualifiedPrototype {
++  Architecture *arch;
++  ProtoModel *model;
++  vector<ParameterPieces> storage;
++public:
++  QualifiedPrototype(Architecture *architecture,const string &name,int4 extrapop,Datatype *output,const vector<Datatype *> &inputs) : arch(architecture) {
++    model = arch->getModel(name);
++    ASSERT(model != (ProtoModel *)0);
++    ASSERT_EQUALS(model->getName(),name);
++    ASSERT_EQUALS(model->getExtraPop(),extrapop);
++    PrototypePieces proto;
++    proto.model = model;
++    proto.outtype = output;
++    proto.intypes = inputs;
++    proto.firstVarArgSlot = -1;
++    model->assignParameterStorage(proto,storage,false);
++    ASSERT_EQUALS(storage.size(),inputs.size() + 1);
++    ASSERT_EQUALS(storage[0].type,output);
++    for(int4 i=0;i<(int4)storage.size();++i) {
++      ASSERT_EQUALS(storage[i].flags,0);
++      if (i != 0)
++        ASSERT_EQUALS(storage[i].type,inputs[i-1]);
++    }
++    if (output->getMetatype() == TYPE_VOID)
++      ASSERT(storage[0].addr.isInvalid());
++  }
++  void expectRegister(int4 slot,const string &name) const {
++    const VarnodeData &reg(arch->translate->getRegister(name));
++    ASSERT_EQUALS(storage[slot].addr,reg.getAddr());
++    ASSERT_EQUALS(storage[slot].type->getSize(),(int4)reg.size);
++  }
++  void expectStack(int4 slot,uintb offset,int4 size) const {
++    ASSERT_EQUALS(storage[slot].addr,Address(arch->getStackSpace(),offset));
++    ASSERT_EQUALS(storage[slot].type->getSize(),size);
++  }
++  void expectJoin(int4 slot,const vector<string> &registers) const {
++    ASSERT_EQUALS(storage[slot].addr.getSpace()->getType(),IPTR_JOIN);
++    JoinRecord *join = arch->findJoin(storage[slot].addr.getOffset());
++    ASSERT_EQUALS(join->numPieces(),(int4)registers.size());
++    ASSERT_EQUALS((int4)join->getUnified().size,storage[slot].type->getSize());
++    for(int4 i=0;i<(int4)registers.size();++i) {
++      const VarnodeData &reg(arch->translate->getRegister(registers[i]));
++      ASSERT_EQUALS(join->getPiece(i).getAddr(),reg.getAddr());
++      ASSERT_EQUALS(join->getPiece(i).size,reg.size);
++    }
++  }
++  void expectEffects(const vector<string> &unaffected,const vector<string> &killed) const {
++    for(const string &name : unaffected) {
++      const VarnodeData &reg(arch->translate->getRegister(name));
++      ASSERT_EQUALS(model->hasEffect(reg.getAddr(),reg.size),EffectRecord::unaffected);
++    }
++    for(const string &name : killed) {
++      const VarnodeData &reg(arch->translate->getRegister(name));
++      ASSERT_EQUALS(model->hasEffect(reg.getAddr(),reg.size),EffectRecord::killedbycall);
++    }
++  }
++};
++
++static Datatype *qualifiedRecord(Architecture *arch,const string &name,int4 size,const vector<TypeField> &fields)
++
++{
++  TypeStruct *record = arch->types->getTypeStruct(name);
++  arch->types->setFields(fields,{},record,size,1,0);
++  ASSERT_EQUALS(record->getSize(),size);
++  return record;
++}
++
++static void checkQualifiedPrototypes(const string &language)
++
++{
++  SegmentedEnvironment::initialize();
++  istringstream image("<binaryimage arch=\"x86:LE:16:" + language + ":default\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">cb</bytechunk></binaryimage>");
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  Datatype *byte = arch->types->getBase(1,TYPE_UINT);
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  Datatype *voidType = arch->types->getTypeVoid();
++  Datatype *farRecord = qualifiedRecord(arch.get(),"QualifiedFarRecord",4,{TypeField(0,0,"offset",word),TypeField(1,2,"segment",word)});
++  // Packed finite analysis records: flag byte first, then low-to-high WORD pieces; neither Boolean nor host pointer returns.
++  Datatype *compareRecord = qualifiedRecord(arch.get(),"QualifiedCompareRecord",9,{TypeField(0,0,"zf",byte),TypeField(1,1,"ax",word),TypeField(2,3,"dx",word),TypeField(3,5,"bx",word),TypeField(4,7,"cx",word)});
++  Datatype *writerRecord = qualifiedRecord(arch.get(),"QualifiedWriterRecord",7,{TypeField(0,0,"cf",byte),TypeField(1,1,"dx",word),TypeField(2,3,"cx",word),TypeField(3,5,"es",word)});
++
++  QualifiedPrototype scopy(arch.get(),"borland_f_scopy_16far",12,voidType,{word,farRecord,farRecord});
++  scopy.expectRegister(1,"CX");
++  scopy.expectStack(2,4,4);
++  scopy.expectStack(3,8,4);
++  scopy.expectEffects({"AX","BX","DX","SP","BP","SI","DI","DS","SS","CS"},{"CX","ES","DF","CF","PF","AF","ZF","SF","OF"});
++
++  QualifiedPrototype copy(arch.get(),"borland_far_copy_16far",4,farRecord,{farRecord,farRecord,word});
++  copy.expectStack(1,4,4);
++  copy.expectStack(2,8,4);
++  copy.expectStack(3,12,2);
++  copy.expectJoin(0,{"DX","AX"});
++  copy.expectEffects({"BX","SP","BP","SI","DI","DS","SS","CS"},{"AX","DX","CX","ES","DF","CF","PF","AF","ZF","SF","OF"});
++
++  QualifiedPrototype compare(arch.get(),"borland_far_pointer_compare_16far",4,compareRecord,{farRecord,farRecord});
++  compare.expectJoin(1,{"DX","AX"});
++  compare.expectJoin(2,{"CX","BX"});
++  compare.expectJoin(0,{"CX","BX","DX","AX","ZF"});
++  compare.expectEffects({"SP","BP","SI","DI","DS","ES","SS","CS","DF"},{"AX","DX","BX","CX","CF","PF","AF","ZF","SF","OF"});
++
++  QualifiedPrototype move(arch.get(),"borland_fmemmove_16far",4,farRecord,{farRecord,farRecord,word});
++  move.expectStack(1,4,4);
++  move.expectStack(2,8,4);
++  move.expectStack(3,12,2);
++  move.expectJoin(0,{"DX","AX"});
++  move.expectEffects({"SP","BP","SI","DI","DS","SS","CS"},{"BX","AX","DX","CX","ES","DF","CF","PF","AF","ZF","SF","OF"});
++
++  for(const char *name : {"borland_memset_16far","borland_setmem_16far"}) {
++    QualifiedPrototype fill(arch.get(),name,4,word,{word,word,word});
++    fill.expectStack(1,4,2);
++    fill.expectStack(2,6,2);
++    fill.expectStack(3,8,2);
++    fill.expectRegister(0,"AX");
++    fill.expectEffects({"BX","DX","SP","BP","SI","DI","DS","SS","CS"},{"AX","CX","ES","DF","CF","PF","AF","ZF","SF","OF"});
++  }
++
++  // The qualified mathematical domain is entry CL 0..31; this test checks storage, not shift execution or out-of-range behavior.
++  QualifiedPrototype shift(arch.get(),"borland_word_shift_16far",4,farRecord,{farRecord,byte});
++  shift.expectJoin(1,{"DX","AX"});
++  shift.expectRegister(2,"CL");
++  shift.expectJoin(0,{"DX","AX"});
++  shift.expectEffects({"CH","BP","SI","DI","DS","ES","SS","CS","SP"},{"AX","DX","BX","CL","CF","PF","AF","ZF","SF","OF"});
++
++  // Selected qualified writer state only: the CF-containing record does not establish actual I/O success.
++  QualifiedPrototype writer(arch.get(),"tlink_writer_state_16near",2,writerRecord,{word,word,word,word});
++  writer.expectRegister(1,"BX");
++  writer.expectRegister(2,"CX");
++  writer.expectRegister(3,"DX");
++  writer.expectRegister(4,"DS");
++  writer.expectJoin(0,{"ES","CX","DX","CF"});
++  writer.expectEffects({"AX","BX","SP","BP","SI","DI","DS","SS","CS","DF"},{"CX","DX","ES","CF","PF","AF","ZF","SF","OF"});
++
++  // Retain the pre-existing fmovmem's explicit void analysis result despite its native AX output anchor.
++  QualifiedPrototype fmovmem(arch.get(),"borland_fmovmem_16far",4,voidType,{farRecord,farRecord,word});
++  fmovmem.expectStack(1,4,4);
++  fmovmem.expectStack(2,8,4);
++  fmovmem.expectStack(3,12,2);
++  fmovmem.expectEffects({"SP","BP","SI","DI","DS","SS","CS"},{"BX","AX","DX","CX","ES","DF","CF","PF","AF","ZF","SF","OF"});
++}
++
++TEST(qualified_prototypes_protected) {
++  checkQualifiedPrototypes("Protected Mode");
++}
++
++TEST(qualified_prototypes_real) {
++  checkQualifiedPrototypes("Real Mode");
++}
++
+ } // End namespace ghidra

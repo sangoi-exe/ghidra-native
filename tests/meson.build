@@ -10,7 +10,7 @@ decompiler_test = executable('decompiler_test',
   link_with: [ghidra_base_static, ghidra_decompiler_static, slgh_static, libdecomp_static])
 
 x86_languages = processor_dir / 'x86' / 'data' / 'languages'
-foreach spec : ['x86.ldefs', 'x86-16.pspec', 'x86-16.cspec']
+foreach spec : ['x86.ldefs', 'x86-16.pspec', 'x86-16-real.pspec', 'x86-16.cspec']
   configure_file(input: x86_languages / spec, output: spec, copy: true)
 endforeach
 x86_test_sla = custom_target('x86-test-sla',
