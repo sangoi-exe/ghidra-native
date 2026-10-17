@@ -2,6 +2,8 @@
 
 This independent repository owns the native decompiler, Sleigh compiler and processor specifications used by r2ghidra. Paths and commands below are relative to this root. See [the bridge guide](../AGENTS.md) for plugin integration and the separate build-managed engine copy; editing this checkout does not update that copy or its pin. Follow native Ghidra C++/specification conventions in the affected files, not the host's C conventions. The native Meson project currently selects C++14.
 
+For commits, follow [the shared prospective attribution rule](../../AGENTS.md#shared-prospective-commit-attribution).
+
 ## Canonical changes and generated followers
 
 - `patches/*.patch` is the canonical local patch stack. `scripts/apply_patches.py` applies these top-level files in sorted filename order and writes `patch.done` only after completing the stack; Make and Meson use this same runner. `patches/Attic/` is not in that applied set.
