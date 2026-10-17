@@ -1,0 +1,211 @@
+diff --git a/src/decompiler/override.hh b/src/decompiler/override.hh
+--- a/src/decompiler/override.hh
++++ b/src/decompiler/override.hh
+@@ -76,7 +76,7 @@
+     virtual void printRaw(ostream &s,const Address &addr) const=0;
+
+     static Record *allocateFlow(const string &name);		///< Return a corresponding flow override record
+-    static Record *allocateCallDest(const string &name,const Address &dest);	///< Return a corresponding call destination override
++    static Record *allocateCallDest(const string &name,const Address &dest);	///< Return a corresponding call destination or continuation override
+   };
+
+   /// \brief Override a CALL, CALLIND, or RETURN to become a BRANCH or BRANCHIND
+@@ -147,6 +147,17 @@
+     virtual void printRaw(ostream &s,const Address &addr) const;
+     static const string NAME;	///< Name of the call -> call override record
+   };
++
++  /// \brief Preserve a CALL or CALLIND and continue analysis at a qualified resume address
++  class CallContinuation : public Record {
++    Address resumeAddress;	///< Analyzed continuation, not the machine return address
++  public:
++    CallContinuation(const Address &resume) : resumeAddress(resume) {}	///< Constructor
++    virtual void performOverride(const Address &addr,Funcdata &data) const;
++    virtual void encode(Encoder &encoder,const Address &addr) const;
++    virtual void printRaw(ostream &s,const Address &addr) const;
++    static const string NAME;	///< Name of the call continuation override record
++  };
+ private:
+   map<Address,Record *> pcodeover;	///< Raw p-code overrides for instructions
+   map<Address,Address> forcegoto;	///< Force goto on jump at \b targetpc to \b destpc
+diff --git a/src/decompiler/override.cc b/src/decompiler/override.cc
+--- a/src/decompiler/override.cc
++++ b/src/decompiler/override.cc
+@@ -154,10 +154,10 @@
+   pcodeover[addr] = rec;
+ }
+
+-/// \brief Change a CALL, CALLIND, or CALLOTHER instruction into a CALL with the specified destination address
++/// \brief Override a call destination or its qualified analyzed continuation
+ ///
+ /// \param addr is the address of the instruction
+-/// \param dest is the new destination address
++/// \param dest is the destination or continuation address required by the override type
+ /// \param type is the type of override to force
+ void Override::insertDestinationOverride(const Address &addr,const Address &dest,const string &type)
+
+@@ -419,9 +419,9 @@
+   throw LowlevelError("Unknown flow override name: "+name);
+ }
+
+-/// \param name is the particular call destination override name
+-/// \param dest is the new destination address
+-/// \return a newly allocated destination override record
++/// \param name is the particular call destination or continuation override name
++/// \param dest is the destination or continuation address
++/// \return a newly allocated call override record
+ Override::Record *Override::Record::allocateCallDest(const string &name,const Address &dest)
+
+ {
+@@ -431,6 +431,8 @@
+     return new CallotherBranch(dest);
+   else if (name == CallCall::NAME)
+     return new CallCall(dest);
++  else if (name == CallContinuation::NAME)
++    return new CallContinuation(dest);
+   throw LowlevelError("Unknown call destination override name: "+name);
+ }
+
+@@ -657,4 +659,35 @@
+   s << "override CALL at " << addr << " to call to a new address " << callAddress << endl;
+ }
+
++const string Override::CallContinuation::NAME = "call_continuation";
++
++void Override::CallContinuation::performOverride(const Address &addr,Funcdata &data) const
++
++{
++  PcodeOp *op = data.findPrimaryBranch(addr,false,true,false,false);
++  if (op == (PcodeOp *)0 || !op->isDead())
++    throw LowlevelError("Could not apply CALL continuation override");
++  // Keep the decoded CALL and its pushed return address; only redirect analyzed continuation.
++  PcodeOp *branch = data.newOp(1,addr);
++  data.opSetOpcode(branch,CPUI_BRANCH);
++  data.opSetInput(branch,data.newCodeRef(resumeAddress),0);
++  data.opDeadInsertAfter(branch,op);
++}
++
++void Override::CallContinuation::encode(Encoder &encoder,const Address &addr) const
++
++{
++  encoder.openElement(ELEM_CALLDEST);
++  encoder.writeString(ATTRIB_TYPE, NAME);
++  addr.encode(encoder);
++  resumeAddress.encode(encoder);
++  encoder.closeElement(ELEM_CALLDEST);
++}
++
++void Override::CallContinuation::printRaw(ostream &s,const Address &addr) const
++
++{
++  s << "override CALL continuation at " << addr << " to resume at " << resumeAddress << endl;
++}
++
+ } // End namespace ghidra
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -527,4 +527,103 @@
+   checkQualifiedPrototypes("Real Mode");
+ }
+
++TEST(call_continuation_override) {
++  SegmentedEnvironment::initialize();
++  // The caller supplies a qualified resume; these decoded bytes test the operation, not helper/prefix qualification.
++  for(int4 length=7;length>=6;--length) {
++    istringstream image(string(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
++<bytechunk space="ram" offset="0x1000de2c" readonly="true">e8c1d6)") +
++        (length == 7 ? "07" : "06") + R"(00000000000040b83412c3</bytechunk>
++</binaryimage>)");
++    DocumentStorage store;
++    Document *doc = store.parseDocument(image);
++    store.registerTag(doc->getRoot());
++    unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++    arch->init(store);
++    AddrSpace *ram = arch->getDefaultCodeSpace();
++    Address callAddress(ram,0x1000de2c);
++    Address adjacentReturn(ram,0x1000de2f);
++    Address resume(ram,adjacentReturn.getOffset() + 1 + length);
++    Address target(ram,0x1000b4f0);
++    Scope *global = arch->symboltab->getGlobalScope();
++    global->addFunction(target,"inline_consumer");
++    Funcdata *fd = global->addFunction(callAddress,"inline_caller")->getFunction();
++    istringstream helperDeclaration("extern void __cdecl16near inline_consumer(void);");
++    parse_C(arch.get(),helperDeclaration);
++    istringstream callerDeclaration("extern uint2 __cdecl16near inline_caller(void);");
++    parse_C(arch.get(),callerDeclaration);
++    ASSERT_EQUALS(arch->translate->instructionLength(callAddress),3);
++
++    Override original;
++    original.insertDestinationOverride(callAddress,resume,Override::CallContinuation::NAME);
++    ostringstream encoded;
++    XmlEncode encoder(encoded);
++    original.encode(encoder,arch.get());
++    istringstream input(encoded.str());
++    XmlDecode decoder(arch.get());
++    decoder.ingestStream(input);
++    fd->getOverride().decode(decoder,arch.get());
++
++    fd->startProcessing();
++    ASSERT_EQUALS(fd->numCalls(),1);
++    FuncCallSpecs *spec = fd->getCallSpecs(0);
++    ASSERT_EQUALS(spec->getEntryAddress(),target);
++    ASSERT(!spec->isNoReturn());
++    PcodeOp *call = spec->getOp();
++    ASSERT_EQUALS(call->code(),CPUI_CALL);
++    ASSERT_EQUALS(call->getAddr(),callAddress);
++    PcodeOp *branch = call->nextOp();
++    ASSERT(branch != (PcodeOp *)0);
++    ASSERT_EQUALS(branch->code(),CPUI_BRANCH);
++    ASSERT_EQUALS(branch->getAddr(),callAddress);
++    ASSERT_EQUALS(branch->getIn(0)->getAddr(),resume);
++    ASSERT_EQUALS(call->getParent()->sizeOut(),1);
++    ASSERT_EQUALS(call->getParent()->getOut(0)->getStart(),resume);
++    Varnode *returnValue = (Varnode *)0;
++    bool pushedAdjacentReturn = false;
++    bool sawResume = false;
++    int4 returns = 0;
++    for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++      PcodeOp *op = (*iter).second;
++      ASSERT(op->getAddr() < adjacentReturn || resume <= op->getAddr());
++      if (op->getAddr() == resume)
++        sawResume = true;
++      if (op->getAddr() == callAddress && op->code() == CPUI_COPY) {
++        Varnode *value = op->getIn(0);
++        if (value->isConstant() && value->getSize() == 2 && value->getOffset() == 0xde2f)
++          returnValue = op->getOut();
++      }
++      if (op->getAddr() == callAddress && op->code() == CPUI_STORE && returnValue != (Varnode *)0) {
++        // Raw instruction inputs have not yet been linked by heritage.
++        Varnode *value = op->getIn(2);
++        if (value->getAddr() == returnValue->getAddr() && value->getSize() == returnValue->getSize())
++          pushedAdjacentReturn = true;
++      }
++      if (op->code() == CPUI_RETURN) {
++        ASSERT_EQUALS(op->getAddr(),Address(ram,0x1000de3a));
++        ++returns;
++      }
++    }
++    ASSERT(pushedAdjacentReturn);
++    ASSERT(sawResume);
++    ASSERT_EQUALS(returns,1);
++    ASSERT_EQUALS(arch->translate->instructionLength(callAddress),3);
++
++    arch->clearAnalysis(fd);
++    arch->allacts.getCurrent()->reset(*fd);
++    ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++    ASSERT_EQUALS(fd->numCalls(),1);
++    ASSERT_EQUALS(fd->getCallSpecs(0)->getEntryAddress(),target);
++    ASSERT(!fd->getCallSpecs(0)->isNoReturn());
++    ostringstream output;
++    arch->print->setOutputStream(&output);
++    arch->print->docFunction(fd);
++    string text = output.str();
++    ASSERT(text.find("inline_consumer();") != string::npos);
++    ASSERT(text.find("return 0x1234;") != string::npos);
++    ASSERT(text.find("halt_") == string::npos);
++    arch->print->setOutputStream((ostream *)0);
++  }
++}
++
+ } // End namespace ghidra
