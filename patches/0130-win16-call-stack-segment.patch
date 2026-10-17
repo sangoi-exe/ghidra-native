@@ -164,6 +164,29 @@ diff --git a/src/Processors/x86/data/languages/x86-16.cspec b/src/Processors/x86
    <default_proto>
      <prototype name="__stdcall16near" extrapop="unknown" stackshift="2">
        <input>
+diff --git a/src/decompiler/ruleaction.cc b/src/decompiler/ruleaction.cc
+--- a/src/decompiler/ruleaction.cc
++++ b/src/decompiler/ruleaction.cc
+@@ -4262,9 +4262,17 @@
+
+   offvn = op->getIn(1);		// Address offset
+   loadspace = op->getIn(0)->getSpaceFromConst(); // Space being loaded/stored
+-  // A segmented address is not a spacebase offset: its selector is an independent dependency, even when the offset is based on the stack pointer. RuleSegment handles constant addresses.
+   if (offvn->isWritten()&&(offvn->getDef()->code()==CPUI_SEGMENTOP)) {
+-    return (AddrSpace *)0;
++    PcodeOp *segment = offvn->getDef();
++    Varnode *selector = segment->getIn(1);
++    const VarnodeData &stackSegment(glb->stackSegment);
++    // Only the unchanged entry selector paired with the canonical stack offset identifies formal stack storage; its numeric value need not be known.
++    if (stackSegment.space == (AddrSpace *)0 || !selector->isInput() ||
++        selector->getSize() != stackSegment.size || selector->getAddr() != stackSegment.getAddr() ||
++        segment->getIn(0)->getSpaceFromConst() != loadspace)
++      return (AddrSpace *)0;
++    AddrSpace *space = vnSpacebase(glb,segment->getIn(2),offoff,loadspace);
++    return space == glb->getStackSpace() ? space : (AddrSpace *)0;
+   }
+   else if (offvn->isConstant()) { // Check for constant
+     offoff = offvn->getOffset();
 diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
@@ -225,7 +248,7 @@ diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
      return res;
    }
    Varnode *constant(int4 size,uintb value,Datatype *type = (Datatype *)0) {
-@@ -188,4 +202,176 @@
+@@ -188,4 +202,255 @@
    ASSERT(text.find("->second)") != string::npos);
  }
 
@@ -309,6 +332,97 @@ diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
 +  ASSERT_EQUALS(selector->getSize(),2);
 +}
 +
++TEST(segmented_unlocked_stack_parameters) {
++  SegmentedEnvironment::initialize();
++  // The production near16 witness: no declarations, locked prototypes, or injected stack reads.
++  istringstream image(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
++<bytechunk space="ram" offset="0x1000" readonly="true">558bec368b46045dc390909090909090683412e8eaff83c402c3</bytechunk>
++</binaryimage>)");
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  AddrSpace *ram = arch->getDefaultCodeSpace();
++  AddrSpace *stack = arch->getStackSpace();
++  Scope *global = arch->symboltab->getGlobalScope();
++  Funcdata *callee = global->addFunction(Address(ram,0x1000),"stack_callee")->getFunction();
++  Funcdata *caller = global->addFunction(Address(ram,0x1010),"stack_caller")->getFunction();
++  ASSERT_EQUALS(arch->allacts.getCurrentName(),"decompile");
++  ASSERT(!callee->getFuncProto().isInputLocked());
++  ASSERT(!caller->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),0);
++  arch->allacts.getCurrent()->reset(*callee);
++  ASSERT(arch->allacts.getCurrent()->perform(*callee) >= 0);
++  ASSERT(!callee->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),1);
++  ProtoParameter *param = callee->getFuncProto().getParam(0);
++  ASSERT_EQUALS(param->getAddress(),Address(stack,2));
++  ASSERT_EQUALS(param->getSize(),2);
++  Varnode *input = callee->findVarnodeInput(2,Address(stack,2));
++  ASSERT(input != (Varnode *)0);
++  ASSERT(!input->hasNoDescend());
++  arch->allacts.getCurrent()->reset(*caller);
++  ASSERT(arch->allacts.getCurrent()->perform(*caller) >= 0);
++  ASSERT_EQUALS(caller->numCalls(),1);
++  FuncCallSpecs *spec = caller->getCallSpecs(0);
++  ASSERT(!spec->isInputLocked());
++  ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++  PcodeOp *call = spec->getOp();
++  ASSERT_EQUALS(call->numInput(),2);
++  ASSERT(call->getIn(1)->isConstant());
++  ASSERT_EQUALS(call->getIn(1)->getSize(),2);
++  ASSERT_EQUALS(call->getIn(1)->getOffset(),0x1234);
++  ASSERT_EQUALS(spec->numParams(),1);
++  ASSERT_EQUALS(spec->getParam(0)->getAddress(),param->getAddress());
++  ostringstream output;
++  arch->print->setOutputStream(&output);
++  arch->print->docFunction(callee);
++  ASSERT(output.str().find("segmentop") == string::npos);
++  output.str("");
++  arch->print->docFunction(caller);
++  ASSERT(output.str().find("stack_callee(0x1234)") != string::npos);
++  arch->print->setOutputStream((ostream *)0);
++}
++
++TEST(segmented_independent_stack_selectors) {
++  SegmentedEnvironment::initialize();
++  istringstream image(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
++<bytechunk space="ram" offset="0x1020" readonly="true">558bec3e8b46045dc3</bytechunk>
++<bytechunk space="ram" offset="0x1030" readonly="true">558bec8ed1368b46045dc3</bytechunk>
++</binaryimage>)");
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  AddrSpace *ram = arch->getDefaultCodeSpace();
++  for(int4 changed=0;changed<2;++changed) {
++    // DS is independent of entry SS; writing SS from CX does not establish entry-stack identity either.
++    Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1020 + changed * 0x10),changed ? "changed_ss" : "independent_ds")->getFunction();
++    arch->allacts.getCurrent()->reset(*fd);
++    ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++    ASSERT(!fd->getFuncProto().isInputLocked());
++    ASSERT_EQUALS(fd->getFuncProto().numParams(),0);
++    ASSERT(fd->findVarnodeInput(2,Address(arch->getStackSpace(),2)) == (Varnode *)0);
++    bool found = false;
++    for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++      PcodeOp *segment = (*iter).second;
++      if (segment->isDead() || segment->code() != CPUI_SEGMENTOP) continue;
++      Varnode *selector = segment->getIn(1);
++      ASSERT(selector->isInput());
++      ASSERT_EQUALS(selector->getAddr(),arch->translate->getRegister(changed ? "CX" : "DS").getAddr());
++      found = true;
++    }
++    ASSERT(found);
++    ostringstream output;
++    arch->print->setOutputStream(&output);
++    arch->print->docFunction(fd);
++    ASSERT(output.str().find("segmentop") != string::npos);
++    arch->print->setOutputStream((ostream *)0);
++  }
++}
++
 +// These retained bytes are the original SCRANTIC NE1 fill body/wrapper and the observed JMP/CALL_RETURN regression from segmented-c.xml.
 +TEST(segmented_call_bytes) {
 +  SegmentedEnvironment::initialize();
@@ -348,29 +462,24 @@ diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
 +  ASSERT_EQUALS(spec->getEntryAddress(),Address(ram,0x100011f2));
 +  PcodeOp *call = spec->getOp();
 +  ASSERT_EQUALS(call->numInput(),4);
-+  for(int4 slot=1;slot<=3;++slot) {
-+    Varnode *argument = call->getIn(slot);
-+    ASSERT_EQUALS(argument->getSize(),2);
-+    ASSERT_EQUALS(argument->getDef()->code(),CPUI_LOAD);
-+    Varnode *address = argument->getDef()->getIn(1);
-+    ASSERT_EQUALS(address->getSize(),4);
-+    if (address->getDef()->code() == CPUI_CAST)
-+      address = address->getDef()->getIn(0);
-+    ASSERT_EQUALS(address->getDef()->code(),CPUI_SEGMENTOP);
-+    Varnode *near = address->getDef()->getIn(2);
-+    ASSERT_EQUALS(near->getSize(),2);
-+    ASSERT_EQUALS(near->getDef()->code(),CPUI_PTRSUB);
-+    ASSERT_EQUALS(near->getDef()->getIn(1)->getOffset(),0xfff4 + slot * 2);
-+    Varnode *selector = address->getDef()->getIn(1);
-+    ASSERT(selector->isInput());
-+    ASSERT_EQUALS(selector->getAddr(),arch->stackSegment.getAddr());
-+  }
++  // With unchanged entry SS, the machine pushes and generated reads address the same formal stack.
++  ASSERT_EQUALS(call->getIn(1),wrapper->findVarnodeInput(2,Address(arch->getStackSpace(),4)));
++  ASSERT_EQUALS(call->getIn(2),wrapper->findVarnodeInput(2,Address(arch->getStackSpace(),8)));
++  // The wrapper loads AL only, retaining the incoming AH in its word-sized third argument.
++  ASSERT(call->getIn(3)->isWritten());
++  PcodeOp *join = call->getIn(3)->getDef();
++  ASSERT_EQUALS(join->code(),CPUI_PIECE);
++  ASSERT_EQUALS(call->getIn(3)->getSize(),2);
++  ASSERT(join->getIn(1)->isWritten());
++  PcodeOp *lowByte = join->getIn(1)->getDef();
++  ASSERT_EQUALS(lowByte->code(),CPUI_SUBPIECE);
++  ASSERT_EQUALS(lowByte->getIn(0),wrapper->findVarnodeInput(2,Address(arch->getStackSpace(),6)));
 +  ostringstream output;
 +  arch->print->setOutputStream(&output);
 +  arch->print->setMaxLineSize(300);
 +  arch->print->docFunction(wrapper);
 +  string text = output.str();
-+  ASSERT(text.find("fill_body(*(uint2 *)(xunknown1 *)segmentop(unaff_SS, &stack0xfff6), *(uint2 *)(xunknown1 *)segmentop(unaff_SS, &stack0xfff8), *(uint2 *)(xunknown1 *)segmentop(unaff_SS, &stack0xfffa))") != string::npos);
++  ASSERT(text.find("fill_body(destination, count, CONCAT11((char)((uint2)in_AX >> 8), (xunknown1)value))") != string::npos);
 +  ASSERT(text.find("in_stack_0000fff6") == string::npos);
 +  ASSERT(text.find("in_stack_0000fff8") == string::npos);
 +  ASSERT(text.find("in_stack_0000fffa") == string::npos);
@@ -386,18 +495,11 @@ diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
 +  ASSERT_EQUALS(call->getAddr(),Address(ram,0x10001000));
 +  ASSERT_EQUALS(thunk->getCallSpecs(0)->getEntryAddress(),Address(ram,0x10001010));
 +  ASSERT_EQUALS(call->numInput(),2);
-+  ASSERT_EQUALS(call->getIn(1)->getDef()->code(),CPUI_LOAD);
-+  Varnode *address = call->getIn(1)->getDef()->getIn(1);
-+  if (address->getDef()->code() == CPUI_CAST)
-+    address = address->getDef()->getIn(0);
-+  PcodeOp *segment = address->getDef();
-+  ASSERT_EQUALS(segment->code(),CPUI_SEGMENTOP);
-+  ASSERT_EQUALS(segment->getIn(1)->getAddr(),arch->stackSegment.getAddr());
-+  ASSERT(segment->getIn(1)->isInput());
++  ASSERT_EQUALS(call->getIn(1),thunk->findVarnodeInput(2,Address(arch->getStackSpace(),4)));
 +  output.str("");
 +  arch->print->docFunction(thunk);
 +  text = output.str();
-+  ASSERT(text.find("jump_target(*(uint2 *)segmentop(unaff_SS, &value))") != string::npos);
++  ASSERT(text.find("jump_target(value)") != string::npos);
 +  arch->print->setOutputStream((ostream *)0);
 +}
 +
