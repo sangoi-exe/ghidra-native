@@ -1,0 +1,436 @@
+diff --git a/src/decompiler/heritage.hh b/src/decompiler/heritage.hh
+--- a/src/decompiler/heritage.hh
++++ b/src/decompiler/heritage.hh
+@@ -148,9 +148,11 @@
+   uintb maximumOffset;	///< Maximum offset of the LOAD
+   int4 step;		///< Step of any access into this range (0=unknown)
+   int4 analysisState;	///< 0=unanalyzed, 1=analyzed(partial result), 2=analyzed(full result)
+-  bool rangeIsUnknown;	///< The solver provided no range bound for dependency exclusion
++  RangeList pointerRanges;	///< Conservative byte offsets where the guarded access can start
++  void setPointerRanges(const CircleRange &range);	///< Preserve solver coverage separately from layout hints
++  void addDependencyRanges(RangeList &ranges) const;	///< Add all bytes the guarded access can affect
+   void establishRange(const ValueSetRead &valueSet);	///< Convert partial value set analysis into guard range
+-  void finalizeRange(const ValueSetRead &valueSet);	///< Convert value set analysis to final guard range
++  void finalizeRange(const ValueSetRead &valueSet,bool isComplete);	///< Convert value set analysis to final guard range
+
+   /// \brief Set a new unanalyzed LOAD guard that initially guards everything
+   ///
+@@ -158,14 +160,15 @@
+   /// \param s is the (stack) space it is loading from
+   /// \param off is the base offset that is indexed from
+   void set(PcodeOp *o,AddrSpace *s,uintb off) {
+-    op = o; spc = s; pointerBase=off; minimumOffset=0; maximumOffset=s->getHighest(); step=0; analysisState=0; rangeIsUnknown=true;
++    op = o; spc = s; pointerBase=off; minimumOffset=0; maximumOffset=s->getHighest(); step=0; analysisState=0;
++    pointerRanges.clear(); pointerRanges.insertRange(s,0,s->getHighest());
+   }
+ public:
+   PcodeOp *getOp(void) const { return op; }	///< Get the PcodeOp being guarded
+   uintb getMinimum(void) const { return minimumOffset; }	///< Get minimum offset of the range hint
+   uintb getMaximum(void) const { return maximumOffset; }	///< Get maximum offset of the range hint
+   int4 getStep(void) const { return step; }		///< Get the calculated step associated with the range (or 0)
+-  bool isGuarded(const Address &addr) const;		///< Can this guard alias storage at the given address
++  bool mayAlias(const Address &addr,int4 size) const;	///< Can this access overlap the given storage bytes
+   bool isRangeLocked(void) const { return (analysisState == 2); }	///< Return \b true if the range is fully determined
+   bool isValid(OpCode opc) const { return (!op->isDead() && op->code() == opc); }	///< Return \b true if the record still describes an active LOAD
+ };
+diff --git a/src/decompiler/heritage.cc b/src/decompiler/heritage.cc
+--- a/src/decompiler/heritage.cc
++++ b/src/decompiler/heritage.cc
+@@ -686,6 +686,26 @@
+   fd->opDestroy(op);
+ }
+
++/// Check whether any byte of storage intersects a guard range, including circular storage.
++static bool guardRangesOverlap(const RangeList &ranges,const Address &addr,uintb size)
++
++{
++  AddrSpace *spc = addr.getSpace();
++  uintb first = addr.getOffset();
++  uintb last = spc->wrapOffset(first + size - 1);
++  for(set<Range>::const_iterator iter=ranges.begin();iter!=ranges.end();++iter) {
++    const Range &range(*iter);
++    if (range.getSpace() != spc) continue;
++    if (size - 1 >= spc->getHighest()) return true;
++    if (first <= last) {
++      if (first <= range.getLast() && last >= range.getFirst()) return true;
++    }
++    else if (first <= range.getLast() || last >= range.getFirst())
++      return true;
++  }
++  return false;
++}
++
+ /// \brief Mark the boundary of artificial ops introduced by load guards
+ ///
+ /// Having just completed renaming, run through all new COPY sinks from load guards
+@@ -704,16 +724,13 @@
+     RangeList loadRanges;
+     for(list<LoadGuard>::const_iterator iter=loadGuard.begin();iter!=loadGuard.end();++iter) {
+       const LoadGuard &guard( *iter );
+-      if (guard.rangeIsUnknown)
+-	loadRanges.insertRange(guard.spc, 0, guard.spc->getHighest());
+-      else
+-	loadRanges.insertRange(guard.spc, guard.minimumOffset, guard.maximumOffset);
++      guard.addDependencyRanges(loadRanges);
+     }
+     // Mark everything on the boundary as address forced to prevent dead-code removal
+     for(int4 i=0;i<forces.size();++i) {
+       PcodeOp *op = forces[i];
+       Varnode *vn = op->getOut();
+-      if (loadRanges.inRange(vn->getAddr(), 1))	// If we are within one of the guarded ranges
++      if (guardRangesOverlap(loadRanges, vn->getAddr(), vn->getSize()))	// If we are within one of the guarded ranges
+ 	vn->setAddrForce();			// then consider the output address forced
+       op->clearMark();
+     }
+@@ -744,7 +761,6 @@
+
+ {
+   const CircleRange &range( valueSet.getRange() );
+-  rangeIsUnknown = range.isFull() || range.isEmpty();
+   uintb rangeSize = range.getSize();
+   uintb size;
+   if (range.isEmpty()) {
+@@ -754,7 +770,8 @@
+   else if (range.isFull() || rangeSize > 0xffffff) {
+     minimumOffset = pointerBase;
+     size = 0x1000;
+-    analysisState = 1;	// Don't bother doing more analysis
++    if (range.isFull())
++      analysisState = 1;	// Only an unknown range can skip full dependency analysis
+   }
+   else {
+     step = (rangeSize == 3) ? range.getStep() : 0;	// Check for consistent step
+@@ -788,12 +805,13 @@
+   }
+ }
+
+-void LoadGuard::finalizeRange(const ValueSetRead &valueSet)
++void LoadGuard::finalizeRange(const ValueSetRead &valueSet,bool isComplete)
+
+ {
+   analysisState = 1;		// In all cases the settings determined here are final
+   const CircleRange &range( valueSet.getRange() );
+-  rangeIsUnknown = range.isFull() || range.isEmpty();
++  if (isComplete)
++    setPointerRanges(range);
+   uintb rangeSize = range.getSize();
+   if (rangeSize == 0x100 || rangeSize == 0x10000) {
+     // These sizes likely result from the storage size of the index
+@@ -817,18 +835,56 @@
+     maximumOffset = spc->getHighest();
+ }
+
+-/// Check if the address falls within the dependency range defined by \b this.
+-/// An unknown solver range must not exclude dependencies using the heuristic type-recovery hint.
+-/// \param addr is the given address
+-/// \return \b true if the address is contained
+-bool LoadGuard::isGuarded(const Address &addr) const
++/// Preserve circular solver bounds even when layout recovery discards or truncates them.
++void LoadGuard::setPointerRanges(const CircleRange &range)
++
++{
++  pointerRanges.clear();
++  if (range.isEmpty() || range.getMin() == range.getEnd() || range.getMask() != calc_mask(spc->getAddrSize())) {
++    pointerRanges.insertRange(spc,0,spc->getHighest());
++    return;
++  }
++  uintb first = AddrSpace::addressToByte(range.getMin(),spc->getWordSize());
++  uintb last = AddrSpace::addressToByte((range.getEnd() - 1) & range.getMask(),spc->getWordSize());
++  if (first <= last)
++    pointerRanges.insertRange(spc,first,last);
++  else {
++    pointerRanges.insertRange(spc,first,spc->getHighest());
++    pointerRanges.insertRange(spc,0,last);
++  }
++}
++
++/// Add byte coverage, including accesses that cross the end of the address space.
++void LoadGuard::addDependencyRanges(RangeList &ranges) const
++
++{
++  uintb extra = ((op->code() == CPUI_LOAD) ? op->getOut()->getSize() : op->getIn(2)->getSize()) - 1;
++  uintb highest = spc->getHighest();
++  for(std::set<Range>::const_iterator iter=pointerRanges.begin();iter!=pointerRanges.end();++iter) {
++    uintb first = (*iter).getFirst();
++    uintb last = (*iter).getLast();
++    if (extra >= highest - (last - first)) {
++      ranges.insertRange(spc,0,highest);
++      return;
++    }
++    last = spc->wrapOffset(last + extra);
++    if (first <= last)
++      ranges.insertRange(spc,first,last);
++    else {
++      ranges.insertRange(spc,first,highest);
++      ranges.insertRange(spc,0,last);
++    }
++  }
++}
++
++/// Test byte intersection, not containment, against conservative pointer-start coverage.
++bool LoadGuard::mayAlias(const Address &addr,int4 size) const
+
+ {
+   if (addr.getSpace() != spc) return false;
+-  if (rangeIsUnknown) return true;
+-  if (addr.getOffset() < minimumOffset) return false;
+-  if (addr.getOffset() > maximumOffset) return false;
+-  return true;
++  uintb extra = ((op->code() == CPUI_LOAD) ? op->getOut()->getSize() : op->getIn(2)->getSize()) - 1;
++  Address first(spc,spc->wrapOffset(addr.getOffset() - extra));
++  return guardRangesOverlap(pointerRanges,first,(uintb)size + extra);
+ }
+
+ /// \brief Make final determination of what range new LoadGuards are protecting
+@@ -877,7 +933,8 @@
+   ValueSetSolver vsSolver;
+   vsSolver.establishValueSets(sinks, reads, stackReg, false);
+   WidenerNone widener;
+-  vsSolver.solve(10000,widener);
++  const int4 maxIterations = 10000;
++  vsSolver.solve(maxIterations,widener);
+   list<LoadGuard>::iterator iter;
+   bool runFullAnalysis = false;
+   for(iter=loadIter;iter!=loadGuard.end(); ++iter) {
+@@ -894,14 +951,15 @@
+   }
+   if (runFullAnalysis) {
+     WidenerFull fullWidener;
+-    vsSolver.solve(10000, fullWidener);
++    vsSolver.solve(maxIterations, fullWidener);
++    bool isComplete = vsSolver.getNumIterations() <= maxIterations;
+     for (iter = loadIter; iter != loadGuard.end(); ++iter) {
+       LoadGuard &guard(*iter);
+-      guard.finalizeRange(vsSolver.getValueSetRead(guard.op->getSeqNum()));
++      guard.finalizeRange(vsSolver.getValueSetRead(guard.op->getSeqNum()),isComplete);
+     }
+     for (iter = storeIter; iter != storeGuard.end(); ++iter) {
+       LoadGuard &guard(*iter);
+-      guard.finalizeRange(vsSolver.getValueSetRead(guard.op->getSeqNum()));
++      guard.finalizeRange(vsSolver.getValueSetRead(guard.op->getSeqNum()),isComplete);
+     }
+   }
+ }
+@@ -1600,7 +1658,7 @@
+       continue;
+     }
+     ++iter;
+-    if (!guardRec.isGuarded(addr)) continue;
++    if (!guardRec.mayAlias(addr,size)) continue;
+     copyop = fd->newOp(1,guardRec.op->getAddr());
+     Varnode *vn = fd->newVarnodeOut(size,addr,copyop);
+     vn->setActiveHeritage();
+diff --git a/src/decompiler/ruleaction.cc b/src/decompiler/ruleaction.cc
+--- a/src/decompiler/ruleaction.cc
++++ b/src/decompiler/ruleaction.cc
+@@ -3222,7 +3222,7 @@
+       if (indop->code() == CPUI_STORE) {
+ 	const LoadGuard *guard = data.getStoreGuard(indop);
+ 	if (guard != (const LoadGuard *)0) {
+-	  if (guard->isGuarded(op->getOut()->getAddr()))
++	  if (guard->mayAlias(op->getOut()->getAddr(),op->getOut()->getSize()))
+ 	    return 0;
+ 	}
+ 	else {
+diff --git a/src/decompiler/merge.cc b/src/decompiler/merge.cc
+--- a/src/decompiler/merge.cc
++++ b/src/decompiler/merge.cc
+@@ -82,7 +82,7 @@
+     const LoadGuard *loadGuard = data.getStoreGuard(op);
+     if (loadGuard == (const LoadGuard *)0)
+       return true;
+-    return loadGuard->isGuarded(vn->getAddr());
++    return loadGuard->mayAlias(vn->getAddr(),vn->getSize());
+   }
+   // We could conceivably do secondary testing of CALL ops here
+   return true;
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -769,4 +769,186 @@
+   }
+ }
+
++class DecodedStackAccess {
++public:
++  unique_ptr<Architecture> arch;
++  Funcdata *fd;
++  DecodedStackAccess(const string &language,const string &bytes) {
++    SegmentedEnvironment::initialize();
++    istringstream image("<binaryimage arch=\"" + language + "\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">" + bytes + "</bytechunk></binaryimage>");
++    DocumentStorage store;
++    Document *doc = store.parseDocument(image);
++    store.registerTag(doc->getRoot());
++    arch.reset(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++    arch->init(store);
++    fd = arch->symboltab->getGlobalScope()->addFunction(Address(arch->getDefaultCodeSpace(),0x1000),"stack_access")->getFunction();
++    arch->allacts.getCurrent()->reset(*fd);
++    ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  }
++  const LoadGuard &storeGuard(void) const {
++    const LoadGuard *result = (const LoadGuard *)0;
++    const list<LoadGuard> &guards(fd->getStoreGuards());
++    for(list<LoadGuard>::const_iterator iter=guards.begin();iter!=guards.end();++iter) {
++      if (!(*iter).isValid(CPUI_STORE)) continue;
++      ASSERT(result == (const LoadGuard *)0);
++      result = &*iter;
++    }
++    ASSERT(result != (const LoadGuard *)0);
++    return *result;
++  }
++  bool mayAlias(uintb offset,int4 size) const {
++    return storeGuard().mayAlias(Address(arch->getStackSpace(),offset),size);
++  }
++  void checkReturnedStoreEffect(void) const {
++    PcodeOp *store = storeGuard().getOp();
++    vector<Varnode *> worklist;
++    set<Varnode *> visited;
++    for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++      PcodeOp *op = (*iter).second;
++      if (!op->isDead() && op->code() == CPUI_RETURN && op->numInput() == 2)
++        worklist.push_back(op->getIn(1));
++    }
++    while(!worklist.empty()) {
++      Varnode *value = worklist.back();
++      worklist.pop_back();
++      if (!value->isWritten() || !visited.insert(value).second) continue;
++      PcodeOp *def = value->getDef();
++      if (def->code() == CPUI_INDIRECT && PcodeOp::getOpFromConst(def->getIn(1)->getAddr()) == store)
++        return;
++      for(int4 i=0;i<def->numInput();++i)
++        worklist.push_back(def->getIn(i));
++    }
++    ASSERT(false);
++  }
++};
++
++static void checkFlatConditionalStackStore(const string &bytes)
++
++{
++  DecodedStackAccess env("x86:LE:32:default:gcc",bytes);
++  AddrSpace *stack = env.arch->getStackSpace();
++  PcodeOp *store = env.storeGuard().getOp();
++  ASSERT_EQUALS(store->getAddr().getOffset(),0x1020);
++  ASSERT_EQUALS(store->getIn(2)->getOffset(),3);
++  Varnode *negativeValue = (Varnode *)0;
++  Varnode *positiveValue = (Varnode *)0;
++  PcodeOp *returnOp = (PcodeOp *)0;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead()) continue;
++    if (op->code() == CPUI_RETURN)
++      returnOp = op;
++    if (op->code() != CPUI_INDIRECT) continue;
++    if (PcodeOp::getOpFromConst(op->getIn(1)->getAddr()) != store) continue;
++    Varnode *value = op->getOut();
++    if (value->getSpace() != stack || value->getSize() != 4) continue;
++    if (value->getOffset() == 0xfffffff0)
++      negativeValue = value;
++    if (value->getOffset() == 0x20)
++      positiveValue = value;
++  }
++  ASSERT(negativeValue != (Varnode *)0);
++  ASSERT(positiveValue != (Varnode *)0);
++  ASSERT(returnOp != (PcodeOp *)0);
++  ASSERT_EQUALS(returnOp->numInput(),2);
++  ASSERT(returnOp->getIn(1)->isWritten());
++  PcodeOp *sum = returnOp->getIn(1)->getDef();
++  ASSERT_EQUALS(sum->code(),CPUI_INT_ADD);
++  ASSERT((sum->getIn(0) == negativeValue && sum->getIn(1) == positiveValue) ||
++      (sum->getIn(0) == positiveValue && sum->getIn(1) == negativeValue));
++  Varnode *beforeNegative = negativeValue->getDef()->getIn(0);
++  Varnode *beforePositive = positiveValue->getDef()->getIn(0);
++  ASSERT(beforeNegative->isWritten() && beforePositive->isWritten());
++  ASSERT_EQUALS(beforeNegative->getDef()->code(),CPUI_COPY);
++  ASSERT_EQUALS(beforePositive->getDef()->code(),CPUI_COPY);
++  ASSERT_EQUALS(beforeNegative->getDef()->getIn(0)->getOffset(),1);
++  ASSERT_EQUALS(beforePositive->getDef()->getIn(0)->getOffset(),2);
++}
++
++TEST(flat_conditional_stack_store_negative) {
++  checkFlatConditionalStackStore("558bec83ec10c745f401000000c74524020000008d5df4837d080075038d5d24c703030000008b45f4034524c9c3");
++}
++
++TEST(flat_conditional_stack_store_positive) {
++  checkFlatConditionalStackStore("558bec83ec10c745f401000000c74524020000008d5d24837d080075038d5df4c703030000008b45f4034524c9c3");
++}
++
++TEST(segmented_finite_wrapping_stack_guard) {
++  // Native-generated stack p-code exercises the 16-bit circular solver hull without segment-selector encoding.
++  SegmentedEnvironment env(true);
++  AddrSpace *stack = env.arch->getStackSpace();
++  Varnode *sp = env.fd->constructSpacebaseInput(stack);
++  Datatype *word = env.arch->types->getBase(2,TYPE_UNKNOWN);
++  Datatype *boolean = env.arch->types->getBase(1,TYPE_BOOL);
++  Varnode *input = env.fd->setInputVarnode(env.fd->newVarnode(2,env.arch->translate->getRegister("AX").getAddr()));
++  Varnode *test = env.op(CPUI_INT_EQUAL,{input,env.constant(2,0)},boolean)->getOut();
++  Varnode *index = env.op(CPUI_INT_ZEXT,{test},word)->getOut();
++  Varnode *scaled = env.op(CPUI_INT_MULT,{index,env.constant(2,47)},word)->getOut();
++  Varnode *offset = env.op(CPUI_INT_ADD,{scaled,index},word)->getOut();
++  Varnode *base = env.op(CPUI_INT_ADD,{sp,env.constant(2,0xfff0)},word)->getOut();
++  Varnode *pointer = env.op(CPUI_INT_ADD,{base,offset},word)->getOut();
++  PcodeOp *store = env.op(CPUI_STORE,{env.fd->newVarnodeSpace(stack->getContain()),pointer,env.constant(1,3)});
++  for(int4 i=0;i<3;++i)
++    env.fd->opHeritage();
++  const LoadGuard *guard = env.fd->getStoreGuard(store);
++  ASSERT(guard != (const LoadGuard *)0);
++  ASSERT_EQUALS(guard->getMinimum(),0xfff0);
++  ASSERT_EQUALS(guard->getMaximum(),0xffff);
++  ASSERT(guard->mayAlias(Address(stack,0x20),1));
++  ASSERT(guard->mayAlias(Address(stack,0xfff0),1));
++  ASSERT(!guard->mayAlias(Address(stack,0x100),1));
++}
++
++TEST(flat_discarded_stack_guard) {
++  // The two pointer endpoints yield the solver hull [0x20,0x10020), discarded by layout recovery.
++  DecodedStackAccess env("x86:LE:32:default:gcc","558bec83ec10c74524070000008d5d24837d080075068d9d23000100c703030000008b4524c9c3");
++  ASSERT_EQUALS(env.storeGuard().getMinimum(),0x20);
++  ASSERT_EQUALS(env.storeGuard().getMaximum(),0x101f);
++  ASSERT(env.mayAlias(0x8020,1));
++  ASSERT(env.mayAlias(0x20,1));
++  ASSERT(!env.mayAlias(0x10024,1));
++  ASSERT(!env.storeGuard().mayAlias(Address(env.arch->getDefaultCodeSpace(),0x8020),1));
++}
++
++TEST(flat_large_finite_stack_guard) {
++  // The real solver supplies a finite range larger than the 0x1000 layout hint.
++  DecodedStackAccess env("x86:LE:32:default:gcc","558bec83ec10c74524070000008d5d24837d080075068d9d23000002c703030000008b4524c9c3");
++  ASSERT_EQUALS(env.storeGuard().getMinimum(),0x20);
++  ASSERT_EQUALS(env.storeGuard().getMaximum(),0x101f);
++  ASSERT(env.mayAlias(0x1800020,1));
++  ASSERT(!env.mayAlias(0x2000024,1));
++}
++
++TEST(flat_stack_guard_storage_width) {
++  // One-byte STORE starts at entry SP+0x20 or +0x21 and overlaps the four-byte slot at +0x1e.
++  DecodedStackAccess env("x86:LE:32:default:gcc","558bec83ec10c74522070000008d5d24837d080075038d5d25c603038b4522c9c3");
++  ASSERT(env.mayAlias(0x1e,4));
++  ASSERT(!env.mayAlias(0x1e,2));
++  ASSERT(!env.mayAlias(0x22,1));
++  env.checkReturnedStoreEffect();
++}
++
++TEST(flat_stack_guard_store_width) {
++  // Four-byte STORE starts at entry SP+0x20 or +0x21 and overlaps the byte at +0x23.
++  DecodedStackAccess env("x86:LE:32:default:gcc","558bec83ec10c64527078d5d24837d080075038d5d25c703030000000fb64527c9c3");
++  ASSERT(env.mayAlias(0x23,1));
++  ASSERT(!env.mayAlias(0x25,1));
++  env.checkReturnedStoreEffect();
++}
++
++TEST(flat_stack_guard_wrapping_storage_width) {
++  // Query byte coverage at the frame/return-storage boundary, without asserting safe return control flow.
++  DecodedStackAccess env("x86:LE:32:default:gcc","558bec83ec10c64502078d5d02837d080075038d5d03c603030fb64502c9c3");
++  ASSERT(env.mayAlias(0xfffffffd,4));
++  ASSERT(!env.mayAlias(0xfffffffc,2));
++  ASSERT(!env.mayAlias(0,1));
++}
++
++TEST(flat_stack_guard_wrapping_store_width) {
++  // Query byte coverage at the frame/return-storage boundary, without asserting safe return control flow.
++  DecodedStackAccess env("x86:LE:32:default:gcc","558bec83ec10c64502078d5d02837d080075038d5d03c703030000000fb64502c9c3");
++  ASSERT(env.mayAlias(1,1));
++  ASSERT(!env.mayAlias(3,1));
++}
++
+ } // End namespace ghidra
