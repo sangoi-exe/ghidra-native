@@ -1,0 +1,404 @@
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -125,2 +125,4 @@
+ {
++  declarationFunction = (const Funcdata *)0;
++  declarationReturn = (const Varnode *)0;
+   nullToken = "NULL";
+@@ -2262,32 +2264,2 @@
+
+-/// In C, when printing a function prototype, the function's output data-type is displayed first
+-/// as a type declaration, where the function name acts as the declaration's identifier.
+-/// This method emits the declaration in preparation for this.
+-/// \param proto is the function prototype object
+-/// \param fd is the (optional) Funcdata object providing additional meta-data about the function
+-void PrintC::emitPrototypeOutput(const FuncProto *proto,
+-				 const Funcdata *fd)
+-{
+-  PcodeOp *op;
+-  Varnode *vn;
+-
+-  if (fd != (const Funcdata *)0) {
+-    op = fd->getFirstReturnOp();
+-    if (op != (PcodeOp *)0 && op->numInput() < 2)
+-      op = (PcodeOp *)0;
+-  }
+-  else
+-    op = (PcodeOp *)0;
+-
+-  Datatype *outtype = proto->getOutputType();
+-  if ((outtype->getMetatype()!=TYPE_VOID)&&(op != (PcodeOp *)0))
+-    vn = op->getIn(1);
+-  else
+-    vn = (Varnode *)0;
+-  int4 id = emit->beginReturnType(vn);
+-  pushType(outtype);
+-  recurse();
+-  emit->endReturnType(id);
+-}
+-
+ /// This emits the individual type declarations of the input parameters to the function as a
+@@ -2403,2 +2375,10 @@
+   resetDefaultsPrintC();
++}
++
++void PrintC::clear(void)
++
++{
++  declarationFunction = (const Funcdata *)0;
++  declarationReturn = (const Varnode *)0;
++  PrintLanguage::clear();
+ }
+@@ -2712,7 +2692,38 @@
+
+-void PrintC::emitFunctionDeclaration(const Funcdata *fd)
+-{
++/// Associate return tokens without enclosing the contextual function name and inputs.
++void PrintC::emitOp(const ReversePolish &entry)
++
++{
++  if (declarationFunction != (const Funcdata *)0 && entry.tok->type == OpToken::unary_prefix && entry.visited == 0) {
++    int4 id = emit->beginReturnType(declarationReturn);
++    PrintLanguage::emitOp(entry);
++    emit->endReturnType(id);
++  }
++  else
++    PrintLanguage::emitOp(entry);
++}
++
++void PrintC::emitAtom(const Atom &atom)
++
++{
++  if (declarationFunction != (const Funcdata *)0 && atom.type == functoken && atom.ptr_second.fd == declarationFunction) {
++    const Funcdata *fd = declarationFunction;
++    declarationFunction = (const Funcdata *)0;
++    emitFunctionNameAndInputs(atom);
++    declarationFunction = fd;
++  }
++  else if (declarationFunction != (const Funcdata *)0 && atom.type != blanktoken) {
++    int4 id = emit->beginReturnType(declarationReturn);
++    PrintLanguage::emitAtom(atom);
++    emit->endReturnType(id);
++  }
++  else
++    PrintLanguage::emitAtom(atom);
++}
++
++void PrintC::emitFunctionNameAndInputs(const Atom &atom)
++
++{
++  const Funcdata *fd = atom.ptr_second.fd;
+   const FuncProto *proto = &fd->getFuncProto();
+-  int4 id = emit->beginFuncProto();
+-  emitPrototypeOutput(proto,fd);
+   emit->spaces(1);
+@@ -2727,3 +2738,3 @@
+   emitSymbolScope(fd->getSymbol());
+-  emit->tagFuncName(fd->getDisplayName(),EmitMarkup::funcname_color,fd,(PcodeOp *)0);
++  PrintLanguage::emitAtom(atom);
+
+@@ -2736,3 +2747,21 @@
+   emit->closeGroup(id1);
+-
++}
++
++void PrintC::emitFunctionDeclaration(const Funcdata *fd)
++
++{
++  Datatype *outtype = fd->getFuncProto().getOutputType();
++  PcodeOp *returnOp = fd->getFirstReturnOp();
++  declarationFunction = fd;
++  declarationReturn = (const Varnode *)0;
++  if (outtype->getMetatype() != TYPE_VOID && returnOp != (PcodeOp *)0 && returnOp->numInput() > 1)
++    declarationReturn = returnOp->getIn(1);
++
++  int4 id = emit->beginFuncProto();
++  pushTypeStart(outtype,true);
++  pushAtom(Atom(fd->getDisplayName(),functoken,EmitMarkup::funcname_color,(const PcodeOp *)0,fd));
++  pushTypeEnd(outtype);
++  recurse();
++  declarationFunction = (const Funcdata *)0;
++  declarationReturn = (const Varnode *)0;
+   emit->endFuncProto(id);
+diff --git a/src/decompiler/printc.hh b/src/decompiler/printc.hh
+--- a/src/decompiler/printc.hh
++++ b/src/decompiler/printc.hh
+@@ -156,8 +156,13 @@
+   string nullToken;		///< Token to use for 'null'
+   string sizeSuffix;		///< Characters to print to indicate a \e long integer token
+   CommentSorter commsorter;	///< Container/organizer for comments in the current function
++  const Funcdata *declarationFunction;	///< Function whose contextual name and return type are being emitted
++  const Varnode *declarationReturn;	///< Return value associated with the current function declaration
+
+   // Routines that are specific to C/C++
++  virtual void emitOp(const ReversePolish &entry);
++  virtual void emitAtom(const Atom &atom);
++  void emitFunctionNameAndInputs(const Atom &atom);		///< Emit the contextual function-name operand
+   void buildTypeStack(const Datatype *ct,vector<const Datatype *> &typestack);	///< Prepare to push components of a data-type declaration
+   void pushPrototypeInputs(const FuncProto *proto);				///< Push input parameters
+   void pushSymbolScope(const Symbol *symbol);			///< Push tokens resolving a symbol's scope
+@@ -182,7 +187,6 @@
+   bool checkAddressOfCast(const PcodeOp *op) const;	///< Check if CAST can be printed as an '&'
+   void emitStructDefinition(const TypeStruct *ct);	///< Emit the definition of a \e structure data-type
+   void emitEnumDefinition(const TypeEnum *ct);		///< Emit the definition of an \e enumeration data-type
+-  void emitPrototypeOutput(const FuncProto *proto,const Funcdata *fd);	///< Emit the output data-type of a function prototype
+   void emitPrototypeInputs(const FuncProto *proto);	///< Emit the input data-types of a function prototype
+   void emitGlobalVarDeclsRecursive(Scope *symScope);	///< Emit variable declarations for all global symbols under given scope
+   void emitLocalVarDecls(const Funcdata *fd);		///< Emit variable declarations for a function
+@@ -239,6 +243,7 @@
+   void pushTypePointerRel(const PcodeOp *op);
+ public:
+   PrintC(Architecture *g,const string &nm="c-language");	///< Constructor
++  virtual void clear(void);
+   void setNULLPrinting(bool val) { option_NULL = val; }		///< Toggle the printing of a 'NULL' token
+   void setInplaceOps(bool val) { option_inplace_ops = val; }	///< Toggle the printing of \e in-place operators
+   void setConvention(bool val) { option_convention = val; }	///< Toggle whether calling conventions are printed
+diff --git a/src/decompiler/printlanguage.cc b/src/decompiler/printlanguage.cc
+--- a/src/decompiler/printlanguage.cc
++++ b/src/decompiler/printlanguage.cc
+@@ -165,24 +165,29 @@
+   if (pending < nodepend.size()) // pending varnodes before atom
+     recurse();			// So we must recurse
+
+-  if (revpol.empty())
+-    emitAtom(atom);
+-  else {
++  if (!revpol.empty())
+     emitOp(revpol.back());
+-    emitAtom(atom);
+-    do {
+-      revpol.back().visited += 1;
+-      if (revpol.back().visited == revpol.back().tok->stage) {
+-	emitOp(revpol.back());
+-	if (revpol.back().paren)
+-	  emit->closeParen(CLOSE_PAREN,revpol.back().id);
+-	else
+-	  emit->closeGroup(revpol.back().id);
+-	revpol.pop_back();
+-      }
++  // A contextual atom can emit a complete sub-expression without consuming its parent operators.
++  vector<ReversePolish> parent;
++  parent.swap(revpol);
++  emitAtom(atom);
++  if (!revpol.empty()) {
++    clear();
++    throw LowlevelError("Incomplete expression emitted for atom");
++  }
++  parent.swap(revpol);
++  while(!revpol.empty()) {
++    revpol.back().visited += 1;
++    if (revpol.back().visited == revpol.back().tok->stage) {
++      emitOp(revpol.back());
++      if (revpol.back().paren)
++	emit->closeParen(CLOSE_PAREN,revpol.back().id);
+       else
+-	break;
+-    } while(!revpol.empty());
++	emit->closeGroup(revpol.back().id);
++      revpol.pop_back();
++    }
++    else
++      break;
+   }
+ }
+
+diff --git a/src/decompiler/printlanguage.hh b/src/decompiler/printlanguage.hh
+--- a/src/decompiler/printlanguage.hh
++++ b/src/decompiler/printlanguage.hh
+@@ -296,8 +296,8 @@
+   void pushSymbolDetail(const Varnode *vn,const PcodeOp *op,bool isRead);	///< Push symbol name with adornments matching given Varnode
+
+   bool parentheses(const OpToken *op2);	///< Determine if the given token should be emitted in its own parenthetic expression
+-  void emitOp(const ReversePolish &entry);				///< Send an operator token from the RPN to the emitter
+-  void emitAtom(const Atom &atom);					///< Send an variable token from the RPN to the emitter
++  virtual void emitOp(const ReversePolish &entry);			///< Send an operator token from the RPN to the emitter
++  virtual void emitAtom(const Atom &atom);				///< Send an variable token from the RPN to the emitter
+   static bool unicodeNeedsEscape(int4 codepoint);			///< Determine if the given codepoint needs to be escaped
+   bool escapeCharacterData(ostream &s,const uint1 *buf,int4 count,int4 charsize,bool bigend) const;
+   void recurse(void);							///< Emit from the RPN stack as much as possible
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -258,6 +258,181 @@
+   ASSERT_EQUALS(plain.declaration(functionPointer),"word (*value)(void)");
+   ASSERT_EQUALS(qualified.declaration(functionPointer),"word (far *value)(void)");
+   ASSERT(function->getPrototype()->hasMatchingModel(prototype.model));
++}
++
++class FunctionIdentityEmitter : public EmitPrettyPrint {
++public:
++  const Funcdata *function;
++  FunctionIdentityEmitter(void) : function((const Funcdata *)0) {}
++  virtual void tagFuncName(const string &name,syntax_highlight highlight,const Funcdata *fd,const PcodeOp *op) {
++    function = fd;
++    EmitPrettyPrint::tagFuncName(name,highlight,fd,op);
++  }
++};
++
++template<typename Printer> class FunctionDeclarationPrinter : public Printer {
++  FunctionIdentityEmitter *identityEmitter;
++public:
++  FunctionDeclarationPrinter(Architecture *arch) : Printer(arch) {
++    delete this->emit;
++    identityEmitter = new FunctionIdentityEmitter();
++    this->emit = identityEmitter;
++    this->initializeFromArchitecture();
++  }
++  string declaration(const Funcdata *fd,bool markup = false) {
++    ostringstream output;
++    this->clear();
++    this->setNamespaceStrategy(Printer::ALL_NAMESPACES);
++    this->setMod(Printer::hide_thisparam);
++    this->setOutputStream(&output);
++    this->setMarkup(markup);
++    this->setPackedOutput(false);
++    identityEmitter->function = (const Funcdata *)0;
++    uint4 savedMods = this->mods;
++    int4 function = this->emit->beginFunction(fd);
++    this->emitFunctionDeclaration(fd);
++    ASSERT_EQUALS(identityEmitter->function,fd);
++    ASSERT_EQUALS(this->curscope,fd->getScopeLocal());
++    this->popScope();
++    ASSERT_EQUALS(this->curscope,(const Scope *)0);
++    ASSERT_EQUALS(this->mods,savedMods);
++#ifdef CPUI_DEBUG
++    ASSERT(this->isStackEmpty());
++    ASSERT(this->isModStackEmpty());
++#endif
++    this->emit->endFunction(function);
++    this->emit->flush();
++    this->setMarkup(false);
++    this->setOutputStream((ostream *)0);
++    return output.str();
++  }
++};
++
++class FunctionDeclarationTreeHandler : public TreeHandler {
++  bool syntaxContent;
++public:
++  FunctionDeclarationTreeHandler(Element *root) : TreeHandler(root), syntaxContent(false) {}
++  virtual void startElement(const string &uri,const string &localName,const string &qualifiedName,const Attributes &attributes) {
++    TreeHandler::startElement(uri,localName,qualifiedName,attributes);
++    syntaxContent = localName == "syntax";
++  }
++  virtual void endElement(const string &uri,const string &localName,const string &qualifiedName) {
++    syntaxContent = false;
++    TreeHandler::endElement(uri,localName,qualifiedName);
++  }
++  virtual void ignorableWhitespace(const char *text,int4 start,int4 length) {
++    if (syntaxContent)
++      characters(text,start,length);
++  }
++};
++
++static string functionDeclarationText(const Element *element) {
++  string text = element->getContent();
++  for(const Element *child : element->getChildren())
++    text += functionDeclarationText(child);
++  return text;
++}
++
++TEST(contextual_function_declaration) {
++  SegmentedEnvironment env;
++  Scope *tables = env.arch->symboltab->findCreateScope(0x1234,"Tables",env.arch->symboltab->getGlobalScope());
++  delete env.block;
++  env.fd = tables->addFunction(Address(env.arch->getDefaultCodeSpace(),0x1100),"returns_table")->getFunction();
++  env.fd->setHighLevel();
++  env.block = new BlockBasic(env.fd);
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT,"uint16_t");
++  Datatype *farPointer = factory->getTypePointer(4,word,1);
++  Datatype *array = factory->getTypeArray(3,farPointer);
++  Datatype *returnType = factory->getTypePointer(2,array,1);
++  FuncProto &prototype = env.fd->getFuncProto();
++  prototype.setModel(env.arch->getModel("__cdecl16far"));
++  ParameterPieces output;
++  output.addr = env.arch->translate->getRegister("AX").getAddr();
++  output.type = returnType;
++  output.flags = ParameterPieces::typelock;
++  prototype.setOutput(output);
++  ParameterPieces parameter;
++  parameter.addr = Address(env.arch->getStackSpace(),4);
++  parameter.type = factory->getTypePointer(2,word,1);
++  parameter.flags = ParameterPieces::typelock | ParameterPieces::namelock;
++  prototype.setParam(0,"self",parameter);
++  prototype.getParam(0)->setThisPointer(true);
++  parameter.addr = Address(env.arch->getStackSpace(),6);
++  parameter.type = word;
++  prototype.setParam(1,"slot",parameter);
++  Symbol *argument = prototype.getParam(1)->getSymbol();
++  ASSERT(argument != (Symbol *)0);
++  ASSERT_EQUALS(argument->getScope(),env.fd->getScopeLocal());
++  Varnode *returned = env.op(CPUI_COPY,{env.constant(2,0)},returnType)->getOut();
++  PcodeOp *returnOp = env.op(CPUI_RETURN,{env.constant(2,0),returned});
++  ASSERT_EQUALS(env.fd->getFirstReturnOp(),returnOp);
++  ASSERT_EQUALS(returnOp->getIn(1),returned);
++
++  FunctionDeclarationPrinter<PointerLayerPrintC> printer(env.arch);
++  string expected = "uint16_t far *(near * __cdecl16far Tables::returns_table(uint16_t slot)) [3]";
++  ASSERT_EQUALS(printer.declaration(env.fd),expected);
++  istringstream xml(printer.declaration(env.fd,true));
++  Document document;
++  FunctionDeclarationTreeHandler handler(&document);
++  int4 parsed = xml_parse(xml,&handler);
++  ASSERT_EQUALS(parsed,0);
++  ASSERT_EQUALS(functionDeclarationText(document.getRoot()),expected);
++  vector<const Element *> elements = {document.getRoot()};
++  int4 returnRegions = 0;
++  int4 argumentRegions = 0;
++  int4 argumentTokens = 0;
++  int4 functionNames = 0;
++  int4 conventions = 0;
++  string returnText;
++  while(!elements.empty()) {
++    const Element *element = elements.back();
++    elements.pop_back();
++    if (element->getName() == "return_type") {
++      ASSERT_EQUALS(std::stoull(element->getAttributeValue("varref"),(size_t *)0,0),returned->getCreateIndex());
++      string text = functionDeclarationText(element);
++      ASSERT(text.find("returns_table") == string::npos);
++      ASSERT(text.find("slot") == string::npos);
++      ASSERT(text.find("__cdecl16far") == string::npos);
++      returnText += text;
++      returnRegions += 1;
++    }
++    else if (element->getName() == "vardecl") {
++      ASSERT_EQUALS(std::stoull(element->getAttributeValue("symref"),(size_t *)0,0),argument->getId());
++      ASSERT_EQUALS(functionDeclarationText(element),"uint16_t slot");
++      argumentRegions += 1;
++    }
++    else if (element->getName() == "funcname") {
++      ASSERT_EQUALS(element->getContent(),"returns_table");
++      functionNames += 1;
++    }
++    else if (element->getName() == "variable" && element->getContent() == "slot") {
++      ASSERT_EQUALS(element->getParent()->getName(),"vardecl");
++      ASSERT_EQUALS(std::stoull(element->getParent()->getAttributeValue("symref"),(size_t *)0,0),argument->getId());
++      argumentTokens += 1;
++    }
++    else if (element->getContent() == "__cdecl16far") {
++      ASSERT_EQUALS(std::stoull(element->getAttributeValue("color"),(size_t *)0,0),Emit::keyword_color);
++      conventions += 1;
++    }
++    for(const Element *child : element->getChildren())
++      elements.push_back(child);
++  }
++  ASSERT_EQUALS(returnRegions,4);
++  ASSERT_EQUALS(argumentRegions,1);
++  ASSERT_EQUALS(argumentTokens,1);
++  ASSERT_EQUALS(functionNames,1);
++  ASSERT_EQUALS(conventions,1);
++  ASSERT(returnText.find("uint16_t") != string::npos);
++  ASSERT(returnText.find("far *") != string::npos);
++  ASSERT(returnText.find("near *") != string::npos);
++  ASSERT(returnText.find('3') != string::npos);
++
++  output.type = word;
++  prototype.setOutput(output);
++  returned->updateType(word,true,true);
++  FunctionDeclarationPrinter<PrintC> ordinary(env.arch);
++  ASSERT_EQUALS(ordinary.declaration(env.fd),"uint16_t __cdecl16far Tables::returns_table(uint16_t slot)");
+ }
+
+ static void assertInternalParameterRoundTrip(const ProtoParameter *expected,const ProtoParameter *actual) {
