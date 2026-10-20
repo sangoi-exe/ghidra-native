@@ -25,9 +25,9 @@ with `make test` (meson/ninja required); see `tests/README.md`.
 
 ## Building and embedding
 
-Python 3, Git, Meson, Ninja, and a C++14 compiler are required. Make and Meson
-use the same patch runner, which writes `patch.done` after applying the complete
-stack. Distribution archives include this marker and can be built without Git.
+Python 3, Meson, Ninja, a C++14 compiler and zlib development files (or the Meson zlib fallback) are required. Fresh preparation also requires Git. Make and Meson use the same patch runner, which applies the ordered canonical stack and records the patch and prepared-source byte identities in `patch.done`. Matching prepared distribution archives retain that marker and can be built without Git metadata or the Git executable.
+
+Make validates preparation on every invocation of its patch target; Meson validates at configuration and on subsequent builds, including embedded consumers. Changed patches or source inputs, malformed or old empty markers, and markerless dirty or partly prepared trees fail explicitly without changing source bytes. Preserve your changes and prepare a new checkout or use a matching prepared distribution. Do not remove `patch.done` and retry on an already prepared tree. Generated processor `.sla` outputs paired with `.slaspec` files do not invalidate preparation; the specifications and includes are still checked.
 
 ```
 meson setup build -Dtests=true

@@ -11,8 +11,7 @@ on systems with a full GNU toolchain and BFD.
 
 ## Running
 
-The tests must run against the *patched* sources.  `make test` applies
-the patch stack automatically and then runs meson:
+The tests must run against matching prepared sources. `make test` invokes the shared preparation runner and then runs Meson:
 
 ```
 make test
@@ -21,8 +20,8 @@ make test
 or manually:
 
 ```
-make patch
 meson setup build -Dtests=true
+meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
@@ -32,11 +31,16 @@ On Windows, run the commands from a Visual Studio developer prompt
 ```
 call "C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars64.bat"
 meson setup build -Dtests=true
+meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
 If the system has no zlib development package, meson falls back to the
 `zlib.wrap` file in `subprojects/`.
+
+Preparation and build reuse validate `patch.done` against the current canonical patches and source inputs. A stale, malformed or old empty marker, or a markerless dirty/partly prepared source tree, refuses without changing source bytes. Preserve changes and start with a new checkout or matching prepared distribution; do not remove the marker and retry on the same tree. Matching prepared distributions do not require Git to build, but fresh-preparation tests require a Git checkout and executable.
+
+Meson registers `ghidra-native-unittests` and `patch-preparation`. The former compiles its matching x86 language fixture and runs the native driver; the latter exercises the real patch runner and stack. It checks fresh/matching reuse, Git-free prepared reuse, preserved source bytes on changed patches/source or invalid preparation, and reuse after compiling x86 languages with the built Sleigh compiler. Set `TMPDIR` to a task-scoped cache directory when running the preparation tests; their disposable source copies are created there. Running `python3 tests/test_apply_patches.py` directly without `SLEIGHC` skips the compiler case; the registered Meson test supplies it.
 
 ## Tests
 
@@ -53,6 +57,9 @@ If the system has no zlib development package, meson falls back to the
   payload; without one, `InjectPayloadDynamic::inject` throws
   `Missing dynamic inject`, so the shipped processor specs must not
   declare dynamic injects that native-only users cannot service.
+
+`src/unittests/testsegmented.cc`
+: Patch-supplied segmented/native regressions, including entry-SS dependencies, full/empty guards and conservative finite/overlapping stack dependencies. The conditional flat32 cases decode machine instructions and inspect returned STORE dependencies; the finite 16-bit circular case uses generated p-code and the real range solver. The nonwrapping access-width cases inspect actual returned STORE dependencies. Boundary-wrap controls inspect guard byte coverage, not a safe function return across frame corruption. These bounded tests do not establish universal alias soundness or replace matching bridge production C/XML observations.
 
 ## Manual Dalvik integration repro
 

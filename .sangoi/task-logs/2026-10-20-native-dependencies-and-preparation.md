@@ -1,0 +1,61 @@
+# Native dependencies and prepared-source validity
+
+Status: implementation and bounded integration validation complete; Code Gate pending.
+Intent owner: `.sangoi/planning/2026-10-20-native-dependencies-and-preparation.md`.
+Bases: engine `af8512c10c53ac871d51cb70090eebd1cf236dc4`; bridge `b5667721e4f0694e2a03abda0c648b80fa4ba4fd`.
+
+## N02 integration regression reassessment
+
+Protected invariant: stale or ambiguous preparation must refuse without changing source bytes, while a matching preparation remains usable through the existing native and bridge compilation paths, including normal generated processor-language outputs. Current-user policy remains explicit safe refusal, not automatic reconstruction.
+
+Attempt ledger at reassessment: N02's first candidate records byte fingerprints of the ordered patch stack and every file below `src/`, validates through Make and Meson, and rejects old or mismatched markers. Six real-source owner tests pass. Real old-to-new upgrades with legacy and new markers refuse through Make, fresh Meson setup and an existing Meson build; all 1301 source files and the new marker remain unchanged. Git-free archive build/reuse succeeds. That first candidate was not committed.
+
+Observed integration contradiction: the existing bridge `ghidra/meson.build` calls engine `scripts/compile_sleigh.py`, which runs the real Sleigh compiler with `-a` on processor source directories. The established qualified bridge runtime contains generated `src/Processors/x86/data/languages/x86.sla` and `x86-64.sla`. N02's all-file source fingerprint includes these generated outputs, so normal language generation changes the recorded source digest and makes later validation refuse. This consequence is established by the direct producer/input path, not a completed failing bridge rerun.
+
+Known-good anchor: the unchanged bridge compiler/helper path and the previous qualified bridge runtime at `bridge-cu3d6K` permit those generated language files. The baseline preparation owner did not treat their normal creation as stale source. The new refusal is caused by the candidate's input/output classification, not by a new generator or a pin mismatch.
+
+Stop trigger: a correction of stale-state acceptance exposes a regression in an existing direct follower. Correction edits were paused before route reassessment. The rejected class is whole-tree hashing that conflates source inputs with generated language outputs; do not stabilize that class with additional ownership or recovery machinery.
+
+Owner/follower state: the canonical preparation runner and native Make/Meson validation dependencies remain the selected owner chain. Bridge processor compilation is an established direct follower and remains unchanged. Runtime entry N01 writes only patch 0170 and uses a separate immutable snapshot. No simultaneous writer or validation dependency contamination was found.
+
+Selected continuation: retain the current owner and user-selected safe-refusal policy. Narrow preparation identity to its actual source-input frontier while accepting the existing generated Sleigh outputs. Preserve source-edit detection, patch identity, real-upgrade refusal and Git-free archive reuse. This is not a new Scope, architecture, API or preservation decision; no current-user checkpoint is reopened. Do not relocate the generator, add another checker or ignore all untracked source.
+
+Reducing closure frontier: one established processor-language output class, produced by the current Sleigh helper, must not invalidate source preparation. The exact correction remains Worker-owned within the same five files. No speculative generated-file inventory is admitted.
+
+The reassessment selected exactly one next verification, completed below: run the real processor-language generation in a task-scoped prepared tree, then run the focused preparation regressions/reuse checks. This must accept generated language output while retaining stale and source-edit refusal. A further same-class failure or a newly required owner boundary would stop for a new reassessment rather than another singular patch.
+
+Reassessment outcome: N02 recognizes only processor `.sla` files paired with an existing `.slaspec` as generated outputs. The actual Sleigh producer has this same output rule, including tracked precompiled sBPF/Webassembly data. Seven owner regressions pass. Actual x86 generation produces both SLA files; Make verification, existing Meson target reuse and Git-free reuse succeed without changing the marker or prior source bytes. Editing a canonical specification still refuses. The real old/new upgrade again refuses through all three tested entry points with all 1301 source files and marker bytes unchanged. Source checkpoint: `706a56cec5046395e04e4463347d55b6b14c92da`.
+
+Evidence root: `/home/lucas/.cache/codex/ghidra-native/native-correctness-2026-10-20/preparation-8NpVzo/`. Current correction evidence is under `integration-correction/`, including `summary.log`, `owner-regressions.log` and `upgrade-summary.log`. Earlier full native and extracted prepared-archive build results belong to the initial preparation candidate; they are retained with that limit. The later combined-source/bridge validation below uses the corrected owner.
+
+## N01 actual native causal observation
+
+The baseline native action pipeline decoded both 46-byte flat32 functions. For the positive-slot INDIRECT at `stack:0x20`, actual flags are `noLocalAlias=0`, `usesSpacebasePtr=1`, indirect-creation false and no-indirect-collapse false. The associated guard retains minimum `0xfffffff0`, maximum `0xffffffff`, step 1 and unlocked range status. `isGuarded(0x20)` returns false in the actual guard branch, after which RuleIndirectCollapse destroys the dependency. The negative-slot query returns true. Both final functions incorrectly return the negative-slot value plus constant 2.
+
+This is real decoding/action/guard association, not the Pro adapter's forced flags. Root inspected the complete trace at `/home/lucas/.cache/codex/ghidra-native/native-correctness-2026-10-20/dependency-xV2iWI/trace-flat-ready.log`. Temporary diagnostics are scratch-only and must not enter the canonical patch. No extra varmap correction owner is established by this trace.
+
+## N01 correction and validation
+
+Runtime source checkpoint: `a3a4d7682d8474594c9a9b567f19fdd9b8cee21f`, adding only canonical `patches/0170-conservative-stack-dependencies.patch` after the preparation checkpoint. Native `RangeList` pointer-start coverage is separate from unchanged layout hint fields. Circular solver bounds retain both pieces; discarded/large finite results no longer lose dependency coverage. The size-aware `mayAlias(address,size)` query replaces the address-only query in all live direct consumers. LOAD coverage is expanded and merged for address forcing, including both storage width and operation width across wrap.
+
+The partial WidenerNone pass cannot install finite exclusion coverage. Finite results, including the previous large-range shortcut, reach the existing full pass. The existing solver iteration counter distinguishes completion from its forced limit; an incomplete pass retains unknown coverage. No solver internals, new module or compatibility query were added.
+
+With the exact new regressions against baseline runtime and a mechanical API adaptation for the old signature, 19/28 tests pass: all nine new cases fail. The candidate passes 28/28. A fresh complete stack replay matches the tested source bytes. The native16 finite case uses generated p-code with real Heritage/solver processing, not machine decoding. The discarded/large-range tests verify conservative solver hull coverage; they do not claim every interior address is machine reachable. Nonwrapping width tests inspect actual returned STORE dependencies. Wrap controls inspect guard-domain byte coverage without claiming safe return semantics when the write overlaps saved-frame/return storage. No forced iteration-cap runtime witness was added.
+
+An attempted AND-mask test premise was rejected because actual solver output remained full/unknown even on baseline. Retained tests use observed conditional-endpoint solver hulls instead. Temporary instrumentation recorded original ranges during the real solve, not a later reanalysis. Evidence root is `dependency-xV2iWI`, with `baseline-refined-regressions.log`, `baseline-accepted-suite.log`, `candidate-bounded-compile.log`, `candidate-bounded-suite.log`, `stack-apply.log` and `stack-source-comparison.log`.
+
+Whole-patch Git whitespace checking reports six space-before-tab diagnostics caused by required unified-diff context prefixes before existing tab-indented C++ lines. Actual C++ deltas have no whitespace diagnostics. The scoped Git check with only `space-before-tab` disabled passes; no repository or global Git configuration was changed. The patch is 436 lines and replays byte-identically.
+
+## Combined source and production qualification
+
+Bridge source/pin/guidance checkpoint: `25af7bdd2b6f334493551d26cf0d51dc5f13798c`. Host guidance-only checkpoint: `5981cfc8d1504759949f167209beea4ef2977184`. The pin names exact engine runtime commit `a3a4d7682d8474594c9a9b567f19fdd9b8cee21f`, not later documentary commits. No host runtime or MCP change is assigned. Active guidance describes safe refusal, generated language output and Git-free matching prepared distributions; old completed task records remain unchanged.
+
+A fresh combined bridge Meson build uses `--wrap-mode=nodownload`, `-Dghidra-native:tests=true`, GCC 13.3 and private `r_core` 6.2.5. Native tests pass 28/28; preparation tests pass 7/7 with the built Sleigh compiler and no skips; pcode XML passes. A bounded rebuild, native Make verification, Meson reconfiguration and another bounded rebuild succeed after generated DATA/x86 outputs. `patch.done` bytes remain identical. Root independently repeated the native 28-test driver.
+
+Qualified runtime root: `/home/lucas/.cache/codex/r2ghidra/native-correctness-2026-10-20/integration-ptqtf7/`. Plugin: `build/libcore_r2ghidra.so`. Matching languages: `source/subprojects/ghidra-native/src/Processors/x86/data/languages/`. Host: `/home/lucas/.cache/codex/radare2/m12-host-WFS7Cw/install/bin/r2`; private libraries are under that install's `lib`. Root sets existing `SLEIGHHOME` before explicitly loading the plugin, uses the matching language and writes only private `malloc://0x2000` input buffers.
+
+Root production observations cover six cases: both old41-byte protected16 orders, both new46-byte flat32 orders and both nonwrapping width directions. Every host invocation exits 0 with empty stderr. Both sum families retain both STORE-dependent values in the actual returned addition. The width cases retain the affected returned storage dependency instead of replacing it with its initialization. The first combined verifier used an incorrect hardcoded STORE address for the final width case; its assertion failed after the first five cases passed. Root reread the actual STORE at `0x1016` and reran that case, confirming the returned `stack:0x23` dependency. This was a verifier-address error, not a product failure or a passing six-case command.
+
+Default cast-suppressed pseudocode in the wider-STORE case retains a pre-existing ambiguous-looking pointer addition. Root compared old/current output and enabled the existing `r2ghidra.casts=true` option: the new C explicitly preserves the one-byte address adjustment as `(int32_t *)((int)&arg_24h + 1)`. No printer/configuration source change was needed. The claims concern observed dependency preservation and the admitted oracles, not that cast-suppressed pseudocode is compilable ISO C.
+
+Combined build/test/reuse/linkage evidence is under `integration-ptqtf7/logs/`; exact Meson test summary is `logs/tests.log`, with details in `build/meson-logs/testlog.txt`. Compilation emitted 1948 warning occurrences, including repeated headers, and 22 Sleigh WARN lines; the baseline warning delta was not assessed. No warning-free, sanitizer, all-processor, performance, Windows, network-only or public-CI result is claimed. Matching private artifacts and failure evidence are retained for review/replay; no global installation or new push occurred.
