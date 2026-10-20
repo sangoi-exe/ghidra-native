@@ -1,0 +1,312 @@
+diff --git a/src/decompiler/type.hh b/src/decompiler/type.hh
+--- a/src/decompiler/type.hh
++++ b/src/decompiler/type.hh
+@@ -47,19 +47,19 @@
+ extern ElementId ELEM_DEF;			///< Marshaling element \<def>
+ //extern ElementId ELEM_DEFAULT_ALIGNMENT;	///< Marshaling element \<default_alignment>
+ //extern ElementId ELEM_DEFAULT_POINTER_ALIGNMENT;	///< Marshaling element \<default_pointer_alignment>
+-//extern ElementId ELEM_DOUBLE_SIZE;		///< Marshaling element \<double_size>
++extern ElementId ELEM_DOUBLE_SIZE;		///< Marshaling element \<double_size>
+ extern ElementId ELEM_ENTRY;			///< Marshaling element \<entry>
+ extern ElementId ELEM_ENUM;			///< Marshaling element \<enum>
+ extern ElementId ELEM_FIELD;			///< Marshaling element \<field>
+-//extern ElementId ELEM_FLOAT_SIZE;		///< Marshaling element \<float_size>
++extern ElementId ELEM_FLOAT_SIZE;		///< Marshaling element \<float_size>
+ extern ElementId ELEM_INTEGER_SIZE;		///< Marshaling element \<integer_size>
+-//extern ElementId ELEM_LONG_DOUBLE_SIZE;		///< Marshaling element \<long_double_size>
+-//extern ElementId ELEM_LONG_LONG_SIZE;		///< Marshaling element \<long_long_size>
++extern ElementId ELEM_LONG_DOUBLE_SIZE;		///< Marshaling element \<long_double_size>
++extern ElementId ELEM_LONG_LONG_SIZE;		///< Marshaling element \<long_long_size>
+ extern ElementId ELEM_LONG_SIZE;		///< Marshaling element \<long_size>
+ //extern ElementId ELEM_MACHINE_ALIGNMENT;	///< Marshaling element \<machine_alignment>
+ //extern ElementId ELEM_POINTER_SHIFT;		///< Marshaling element \<pointer_shift>
+ extern ElementId ELEM_POINTER_SIZE;		///< Marshaling element \<pointer_size>
+-//extern ElementId ELEM_SHORT_SIZE;		///< Marshaling element \<short_size>
++extern ElementId ELEM_SHORT_SIZE;		///< Marshaling element \<short_size>
+ extern ElementId ELEM_SIZE_ALIGNMENT_MAP;	///< Marshaling element \<size_alignment_map>
+ extern ElementId ELEM_TYPE;			///< Marshaling element \<type>
+ //extern ElementId ELEM_TYPE_ALIGNMENT_ENABLED;	///< Marshaling element \<type_alignment_enabled>
+@@ -823,8 +823,13 @@
+
+ /// \brief Container class for all Datatype objects in an Architecture
+ class TypeFactory {
++  int4 sizeOfShort;		///< Size of the core "short" data-type
+   int4 sizeOfInt;		///< Size of the core "int" data-type
+   int4 sizeOfLong;		///< Size of the core "long" data-type
++  int4 sizeOfLongLong;		///< Size of the core "long long" data-type
++  int4 sizeOfFloat;		///< Size of the core "float" data-type
++  int4 sizeOfDouble;		///< Size of the core "double" data-type
++  int4 sizeOfLongDouble;		///< Size of the core "long double" data-type
+   int4 sizeOfChar;		///< Size of the core "char" data-type
+   int4 sizeOfWChar;		///< Size of the core "wchar_t" data-type
+   int4 sizeOfPointer;		///< Size of pointers (into default data address space)
+@@ -876,8 +881,13 @@
+   virtual ~TypeFactory(void);	///< Destructor
+   int4 getAlignment(uint4 size) const;	///< Get data-type alignment based on size
+   int4 getPrimitiveAlignSize(uint4 size) const;	///< Get the aligned size of a primitive data-type
++  int4 getSizeOfShort(void) const { return sizeOfShort; }	///< Get the size of the default "short"
+   int4 getSizeOfInt(void) const { return sizeOfInt; }	///< Get the size of the default "int"
+   int4 getSizeOfLong(void) const { return sizeOfLong; }	///< Get the size of the default "long"
++  int4 getSizeOfLongLong(void) const { return sizeOfLongLong; }	///< Get the size of the default "long long"
++  int4 getSizeOfFloat(void) const { return sizeOfFloat; }	///< Get the size of the default "float"
++  int4 getSizeOfDouble(void) const { return sizeOfDouble; }	///< Get the size of the default "double"
++  int4 getSizeOfLongDouble(void) const { return sizeOfLongDouble; }	///< Get the size of the default "long double"
+   int4 getSizeOfChar(void) const { return sizeOfChar; }	///< Get the size of the default "char"
+   int4 getSizeOfWChar(void) const { return sizeOfWChar; }	///< Get the size of the default "wchar_t"
+   int4 getSizeOfPointer(void) const { return sizeOfPointer; }	///< Get the size of pointers
+diff --git a/src/decompiler/type.cc b/src/decompiler/type.cc
+--- a/src/decompiler/type.cc
++++ b/src/decompiler/type.cc
+@@ -50,19 +50,19 @@
+ ElementId ELEM_DEF = ElementId("def",43);
+ //ElementId ELEM_DEFAULT_ALIGNMENT = ElementId("default_alignment", 44);
+ //ElementId ELEM_DEFAULT_POINTER_ALIGNMENT = ElementId("default_pointer_alignment", 45);
+-//ElementId ELEM_DOUBLE_SIZE = ElementId("double_size", 46);
++ElementId ELEM_DOUBLE_SIZE = ElementId("double_size", 46);
+ ElementId ELEM_ENTRY = ElementId("entry",47);
+ ElementId ELEM_ENUM = ElementId("enum",48);
+ ElementId ELEM_FIELD = ElementId("field",49);
+-//ElementId ELEM_FLOAT_SIZE = ElementId("float_size", 50);
++ElementId ELEM_FLOAT_SIZE = ElementId("float_size", 50);
+ ElementId ELEM_INTEGER_SIZE = ElementId("integer_size",51);
+-//ElementId ELEM_LONG_DOUBLE_SIZE = ElementId("long_double_size", 52);
+-//ElementId ELEM_LONG_LONG_SIZE = ElementId("long_long_size", 53);
++ElementId ELEM_LONG_DOUBLE_SIZE = ElementId("long_double_size", 52);
++ElementId ELEM_LONG_LONG_SIZE = ElementId("long_long_size", 53);
+ ElementId ELEM_LONG_SIZE = ElementId("long_size", 54);
+ //ElementId ELEM_MACHINE_ALIGNMENT = ElementId("machine_alignment", 55);
+ //ElementId ELEM_POINTER_SHIFT = ElementId("pointer_shift", 56);
+ ElementId ELEM_POINTER_SIZE = ElementId("pointer_size", 57);
+-//ElementId ELEM_SHORT_SIZE = ElementId("short_size", 58);
++ElementId ELEM_SHORT_SIZE = ElementId("short_size", 58);
+ ElementId ELEM_SIZE_ALIGNMENT_MAP = ElementId("size_alignment_map", 59);
+ ElementId ELEM_TYPE = ElementId("type",60);
+ //ElementId ELEM_TYPE_ALIGNMENT_ENABLED = ElementId("type_alignment_enabled", 61);
+@@ -3598,8 +3598,13 @@
+
+ {
+   glb = g;
++  sizeOfShort = 0;
+   sizeOfInt = 0;
+   sizeOfLong = 0;
++  sizeOfLongLong = 0;
++  sizeOfFloat = 0;
++  sizeOfDouble = 0;
++  sizeOfLongDouble = 0;
+   sizeOfChar = 0;
+   sizeOfWChar = 0;
+   sizeOfPointer = 0;
+@@ -3628,6 +3633,8 @@
+ void TypeFactory::setupSizes(void)
+
+ {
++  if (sizeOfShort == 0)
++    sizeOfShort = 2;
+   if (sizeOfInt == 0) {
+     sizeOfInt = 1;			// Default if we can't find a better value
+     AddrSpace *spc = glb->getStackSpace();
+@@ -3641,6 +3648,14 @@
+   if (sizeOfLong == 0) {
+     sizeOfLong = (sizeOfInt == 4) ? 8 : sizeOfInt;
+   }
++  if (sizeOfLongLong == 0)
++    sizeOfLongLong = 8;
++  if (sizeOfFloat == 0)
++    sizeOfFloat = 4;
++  if (sizeOfDouble == 0)
++    sizeOfDouble = 8;
++  if (sizeOfLongDouble == 0)
++    sizeOfLongDouble = 16;
+   if (sizeOfChar == 0)
+     sizeOfChar = 1;
+   if (sizeOfWChar == 0)
+@@ -5142,8 +5157,23 @@
+     if (subId == ELEM_INTEGER_SIZE) {
+       sizeOfInt = decoder.readSignedInteger(ATTRIB_VALUE);
+     }
++    else if (subId == ELEM_SHORT_SIZE) {
++      sizeOfShort = decoder.readSignedInteger(ATTRIB_VALUE);
++    }
+     else if (subId == ELEM_LONG_SIZE) {
+       sizeOfLong = decoder.readSignedInteger(ATTRIB_VALUE);
++    }
++    else if (subId == ELEM_LONG_LONG_SIZE) {
++      sizeOfLongLong = decoder.readSignedInteger(ATTRIB_VALUE);
++    }
++    else if (subId == ELEM_FLOAT_SIZE) {
++      sizeOfFloat = decoder.readSignedInteger(ATTRIB_VALUE);
++    }
++    else if (subId == ELEM_DOUBLE_SIZE) {
++      sizeOfDouble = decoder.readSignedInteger(ATTRIB_VALUE);
++    }
++    else if (subId == ELEM_LONG_DOUBLE_SIZE) {
++      sizeOfLongDouble = decoder.readSignedInteger(ATTRIB_VALUE);
+     }
+     else if (subId == ELEM_POINTER_SIZE) {
+       sizeOfPointer = decoder.readSignedInteger(ATTRIB_VALUE);
+diff --git a/src/decompiler/printc.hh b/src/decompiler/printc.hh
+--- a/src/decompiler/printc.hh
++++ b/src/decompiler/printc.hh
+@@ -162,6 +162,7 @@
+   void pushPrototypeInputs(const FuncProto *proto);				///< Push input parameters
+   void pushSymbolScope(const Symbol *symbol);			///< Push tokens resolving a symbol's scope
+   void emitSymbolScope(const Symbol *symbol);			///< Emit tokens resolving a symbol's scope
++  virtual void pushPointerType(const TypePointer *ct);		///< Push the operator for one pointer layer of a declaration
+   virtual void pushTypeStart(const Datatype *ct,bool noident);	///< Push part of a data-type declaration onto the RPN stack, up to the identifier
+   virtual void pushTypeEnd(const Datatype *ct);			///< Push the tail ends of a data-type declaration onto the RPN stack
+   void pushBoolConstant(uintb val,const TypeBase *ct,tagtype tag,const Varnode *vn,
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -258,6 +258,14 @@
+   }
+ }
+
++/// Push the default '*' operator, allowing front-ends to specialize individual pointer layers.
++/// \param ct is the pointer data-type being declared
++void PrintC::pushPointerType(const TypePointer *ct)
++
++{
++  pushOp(&ptr_expr,(const PcodeOp *)0);
++}
++
+ /// Store off array sizes for printing after the identifier
+ /// \param ct is the data-type to push
+ /// \param noident is \b true if an identifier will not be pushed as part of the declaration
+@@ -290,7 +298,7 @@
+   for(int4 i=typestack.size()-2;i>=0;--i) {
+     ct = typestack[i];
+     if (ct->getMetatype() == TYPE_PTR)
+-      pushOp(&ptr_expr,(const PcodeOp *)0);
++      pushPointerType((const TypePointer *)ct);
+     else if (ct->getMetatype() == TYPE_ARRAY)
+       pushOp(&array_expr,(const PcodeOp *)0);
+     else if (ct->getMetatype() == TYPE_CODE)
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -104,6 +104,124 @@
+     return output.str();
+   }
+ };
++
++TEST(target_fundamental_sizes) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  ASSERT_EQUALS(factory->getSizeOfChar(),1);
++  ASSERT_EQUALS(factory->getSizeOfWChar(),2);
++  ASSERT_EQUALS(factory->getSizeOfShort(),2);
++  ASSERT_EQUALS(factory->getSizeOfInt(),2);
++  ASSERT_EQUALS(factory->getSizeOfLong(),4);
++  ASSERT_EQUALS(factory->getSizeOfLongLong(),4);
++  ASSERT_EQUALS(factory->getSizeOfFloat(),4);
++  ASSERT_EQUALS(factory->getSizeOfDouble(),8);
++  ASSERT_EQUALS(factory->getSizeOfLongDouble(),10);
++  ASSERT_EQUALS(factory->getSizeOfPointer(),2);
++  ASSERT_EQUALS(factory->getSizeOfAltPointer(),4);
++}
++
++TEST(target_fundamental_size_defaults) {
++  SegmentedEnvironment env;
++  TypeFactory factory(env.arch);
++  istringstream omitted("<data_organization><integer_size value=\"2\"/></data_organization>");
++  XmlDecode omittedDecoder(env.arch);
++  omittedDecoder.ingestStream(omitted);
++  factory.decodeDataOrganization(omittedDecoder);
++  factory.setupSizes();
++  ASSERT_EQUALS(factory.getSizeOfShort(),2);
++  ASSERT_EQUALS(factory.getSizeOfLongLong(),8);
++  ASSERT_EQUALS(factory.getSizeOfFloat(),4);
++  ASSERT_EQUALS(factory.getSizeOfDouble(),8);
++  ASSERT_EQUALS(factory.getSizeOfLongDouble(),16);
++
++  // Distinct local values prove that every field is decoded rather than replaced by a fallback.
++  istringstream explicitSizes("<data_organization><short_size value=\"1\"/><long_long_size value=\"16\"/><float_size value=\"2\"/><double_size value=\"4\"/><long_double_size value=\"8\"/></data_organization>");
++  XmlDecode explicitDecoder(env.arch);
++  explicitDecoder.ingestStream(explicitSizes);
++  factory.decodeDataOrganization(explicitDecoder);
++  factory.setupSizes();
++  ASSERT_EQUALS(factory.getSizeOfShort(),1);
++  ASSERT_EQUALS(factory.getSizeOfLongLong(),16);
++  ASSERT_EQUALS(factory.getSizeOfFloat(),2);
++  ASSERT_EQUALS(factory.getSizeOfDouble(),4);
++  ASSERT_EQUALS(factory.getSizeOfLongDouble(),8);
++
++  // Reloading core types clears data-types, not the compiler specification's organization.
++  istringstream coreTypes("<coretypes/>");
++  XmlDecode coreDecoder(env.arch);
++  coreDecoder.ingestStream(coreTypes);
++  factory.decodeCoreTypes(coreDecoder);
++  factory.clearNoncore();
++  factory.setupSizes();
++  ASSERT_EQUALS(factory.getSizeOfShort(),1);
++  ASSERT_EQUALS(factory.getSizeOfLongLong(),16);
++  ASSERT_EQUALS(factory.getSizeOfFloat(),2);
++  ASSERT_EQUALS(factory.getSizeOfDouble(),4);
++  ASSERT_EQUALS(factory.getSizeOfLongDouble(),8);
++}
++
++class PointerLayerPrintC : public PrintC {
++  OpToken nearPointer;
++  OpToken farPointer;
++protected:
++  virtual void pushPointerType(const TypePointer *ct) {
++    pushOp(ct->getSize() == 2 ? &nearPointer : &farPointer,(const PcodeOp *)0);
++  }
++public:
++  PointerLayerPrintC(Architecture *arch) : PrintC(arch), nearPointer(ptr_expr), farPointer(ptr_expr) {
++    nearPointer.print1 = "near *";
++    farPointer.print1 = "far *";
++  }
++};
++
++template<typename Printer> class PointerDeclarationPrinter : public Printer {
++public:
++  PointerDeclarationPrinter(Architecture *arch) : Printer(arch) {
++    this->initializeFromArchitecture();
++  }
++  string declaration(const Datatype *ct,bool noident = false) {
++    ostringstream output;
++    this->clear();
++    this->setOutputStream(&output);
++    this->pushTypeStart(ct,noident);
++    this->pushAtom(typename Printer::Atom(noident ? "" : "value",Printer::syntax,EmitMarkup::no_color));
++    this->pushTypeEnd(ct);
++    this->recurse();
++    this->emit->flush();
++    this->setOutputStream((ostream *)0);
++    return output.str();
++  }
++};
++
++TEST(pointer_type_layer_printing) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT,"word");
++  Datatype *farPointer = factory->getTypePointer(4,word,1);
++  Datatype *mixedPointer = factory->getTypePointer(2,farPointer,1);
++  Datatype *pointerToArray = factory->getTypePointer(2,factory->getTypeArray(3,word),1);
++  Datatype *arrayOfPointers = factory->getTypeArray(3,farPointer);
++  PrototypePieces prototype;
++  prototype.model = env.arch->defaultfp;
++  prototype.outtype = word;
++  prototype.firstVarArgSlot = -1;
++  TypeCode *function = factory->getTypeCode(prototype);
++  Datatype *functionPointer = factory->getTypePointer(4,function,1);
++  PointerDeclarationPrinter<PrintC> plain(env.arch);
++  PointerDeclarationPrinter<PointerLayerPrintC> qualified(env.arch);
++  ASSERT_EQUALS(plain.declaration(mixedPointer),"word **value");
++  ASSERT_EQUALS(qualified.declaration(mixedPointer),"word far *near *value");
++  ASSERT_EQUALS(plain.declaration(mixedPointer,true),"word **");
++  ASSERT_EQUALS(qualified.declaration(mixedPointer,true),"word far *near *");
++  ASSERT_EQUALS(plain.declaration(pointerToArray),"word (*value) [3]");
++  ASSERT_EQUALS(qualified.declaration(pointerToArray),"word (near *value) [3]");
++  ASSERT_EQUALS(plain.declaration(arrayOfPointers),"word *value [3]");
++  ASSERT_EQUALS(qualified.declaration(arrayOfPointers),"word far *value [3]");
++  ASSERT_EQUALS(plain.declaration(functionPointer),"word (*value)(void)");
++  ASSERT_EQUALS(qualified.declaration(functionPointer),"word (far *value)(void)");
++  ASSERT(function->getPrototype()->hasMatchingModel(prototype.model));
++}
+
+ TEST(segmented_spacebase) {
+   SegmentedEnvironment env;
