@@ -1,0 +1,174 @@
+diff --git a/src/decompiler/heritage.hh b/src/decompiler/heritage.hh
+--- a/src/decompiler/heritage.hh
++++ b/src/decompiler/heritage.hh
+@@ -148,6 +148,7 @@
+   uintb maximumOffset;	///< Maximum offset of the LOAD
+   int4 step;		///< Step of any access into this range (0=unknown)
+   int4 analysisState;	///< 0=unanalyzed, 1=analyzed(partial result), 2=analyzed(full result)
++  bool rangeIsUnknown;	///< The solver provided no range bound for dependency exclusion
+   void establishRange(const ValueSetRead &valueSet);	///< Convert partial value set analysis into guard range
+   void finalizeRange(const ValueSetRead &valueSet);	///< Convert value set analysis to final guard range
+
+@@ -157,14 +158,14 @@
+   /// \param s is the (stack) space it is loading from
+   /// \param off is the base offset that is indexed from
+   void set(PcodeOp *o,AddrSpace *s,uintb off) {
+-    op = o; spc = s; pointerBase=off; minimumOffset=0; maximumOffset=s->getHighest(); step=0; analysisState=0;
++    op = o; spc = s; pointerBase=off; minimumOffset=0; maximumOffset=s->getHighest(); step=0; analysisState=0; rangeIsUnknown=true;
+   }
+ public:
+   PcodeOp *getOp(void) const { return op; }	///< Get the PcodeOp being guarded
+-  uintb getMinimum(void) const { return minimumOffset; }	///< Get minimum offset of the guarded range
+-  uintb getMaximum(void) const { return maximumOffset; }	///< Get maximum offset of the guarded range
++  uintb getMinimum(void) const { return minimumOffset; }	///< Get minimum offset of the range hint
++  uintb getMaximum(void) const { return maximumOffset; }	///< Get maximum offset of the range hint
+   int4 getStep(void) const { return step; }		///< Get the calculated step associated with the range (or 0)
+-  bool isGuarded(const Address &addr) const;		///< Does \b this guard apply to the given address
++  bool isGuarded(const Address &addr) const;		///< Can this guard alias storage at the given address
+   bool isRangeLocked(void) const { return (analysisState == 2); }	///< Return \b true if the range is fully determined
+   bool isValid(OpCode opc) const { return (!op->isDead() && op->code() == opc); }	///< Return \b true if the record still describes an active LOAD
+ };
+diff --git a/src/decompiler/heritage.cc b/src/decompiler/heritage.cc
+--- a/src/decompiler/heritage.cc
++++ b/src/decompiler/heritage.cc
+@@ -704,7 +704,10 @@
+     RangeList loadRanges;
+     for(list<LoadGuard>::const_iterator iter=loadGuard.begin();iter!=loadGuard.end();++iter) {
+       const LoadGuard &guard( *iter );
+-      loadRanges.insertRange(guard.spc, guard.minimumOffset, guard.maximumOffset);
++      if (guard.rangeIsUnknown)
++	loadRanges.insertRange(guard.spc, 0, guard.spc->getHighest());
++      else
++	loadRanges.insertRange(guard.spc, guard.minimumOffset, guard.maximumOffset);
+     }
+     // Mark everything on the boundary as address forced to prevent dead-code removal
+     for(int4 i=0;i<forces.size();++i) {
+@@ -741,6 +744,7 @@
+
+ {
+   const CircleRange &range( valueSet.getRange() );
++  rangeIsUnknown = range.isFull() || range.isEmpty();
+   uintb rangeSize = range.getSize();
+   uintb size;
+   if (range.isEmpty()) {
+@@ -789,6 +793,7 @@
+ {
+   analysisState = 1;		// In all cases the settings determined here are final
+   const CircleRange &range( valueSet.getRange() );
++  rangeIsUnknown = range.isFull() || range.isEmpty();
+   uintb rangeSize = range.getSize();
+   if (rangeSize == 0x100 || rangeSize == 0x10000) {
+     // These sizes likely result from the storage size of the index
+@@ -812,13 +817,15 @@
+     maximumOffset = spc->getHighest();
+ }
+
+-/// Check if the address falls within the range defined by \b this
++/// Check if the address falls within the dependency range defined by \b this.
++/// An unknown solver range must not exclude dependencies using the heuristic type-recovery hint.
+ /// \param addr is the given address
+ /// \return \b true if the address is contained
+ bool LoadGuard::isGuarded(const Address &addr) const
+
+ {
+   if (addr.getSpace() != spc) return false;
++  if (rangeIsUnknown) return true;
+   if (addr.getOffset() < minimumOffset) return false;
+   if (addr.getOffset() > maximumOffset) return false;
+   return true;
+@@ -1570,8 +1577,8 @@
+ /// \brief Guard LOAD ops in preparation for the renaming algorithm
+ ///
+ /// The op must be in the loadGuard list, which means it may pull values from an indexed
+-/// range on the stack.  A COPY guard is placed for the given range on any LOAD op whose
+-/// indexed range it intersects.
++/// range on the stack. A COPY guard is placed for the given range on any LOAD op whose
++/// dependency range it intersects.
+ /// \param fl is boolean properties associated with the address
+ /// \param addr is the first address of the given range
+ /// \param size is the number of bytes in the given range
+@@ -1593,9 +1600,7 @@
+       continue;
+     }
+     ++iter;
+-    if (guardRec.spc != addr.getSpace()) continue;
+-    if (addr.getOffset() < guardRec.minimumOffset) continue;
+-    if (addr.getOffset() > guardRec.maximumOffset) continue;
++    if (!guardRec.isGuarded(addr)) continue;
+     copyop = fd->newOp(1,guardRec.op->getAddr());
+     Varnode *vn = fd->newVarnodeOut(size,addr,copyop);
+     vn->setActiveHeritage();
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -335,6 +335,70 @@
+   arch->print->setOutputStream((ostream *)0);
+ }
+
++static void checkConditionalStackStore(const string &bytes)
++
++{
++  SegmentedEnvironment::initialize();
++  istringstream image(string(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
++<bytechunk space="ram" offset="0x1000" readonly="true">)") + bytes + R"(</bytechunk>
++</binaryimage>)");
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  AddrSpace *ram = arch->getDefaultCodeSpace();
++  AddrSpace *stack = arch->getStackSpace();
++  Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1000),"conditional_stack_store")->getFunction();
++  arch->allacts.getCurrent()->reset(*fd);
++  ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  ostringstream output;
++  arch->print->setOutputStream(&output);
++  arch->print->docFunction(fd);
++  arch->print->setOutputStream((ostream *)0);
++  // BX selects entry SP-0x10 or SP+0x20. Storing 3 makes the returned sum 4 or 5, never 3.
++  Varnode *negativeValue = (Varnode *)0;
++  Varnode *positiveValue = (Varnode *)0;
++  PcodeOp *returnOp = (PcodeOp *)0;
++  for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead()) continue;
++    if (op->code() == CPUI_RETURN)
++      returnOp = op;
++    if (op->code() != CPUI_INDIRECT) continue;
++    PcodeOp *effect = PcodeOp::getOpFromConst(op->getIn(1)->getAddr());
++    if (effect->code() != CPUI_STORE || effect->getAddr() != Address(ram,0x101c)) continue;
++    Varnode *value = op->getOut();
++    if (value->getSpace() != stack || value->getSize() != 2) continue;
++    if (value->getOffset() == 0xfff0)
++      negativeValue = value;
++    if (value->getOffset() == 0x20)
++      positiveValue = value;
++  }
++  ASSERT(negativeValue != (Varnode *)0);
++  ASSERT(positiveValue != (Varnode *)0);
++  ASSERT(returnOp != (PcodeOp *)0);
++  ASSERT_EQUALS(returnOp->numInput(),2);
++  ASSERT(returnOp->getIn(1)->isWritten());
++  PcodeOp *sum = returnOp->getIn(1)->getDef();
++  ASSERT_EQUALS(sum->code(),CPUI_INT_ADD);
++  ASSERT((sum->getIn(0) == negativeValue && sum->getIn(1) == positiveValue) ||
++      (sum->getIn(0) == positiveValue && sum->getIn(1) == negativeValue));
++  string text = output.str();
++  ASSERT(text.find("aiStack_10[0] = 1;") != string::npos);
++  ASSERT(text.find("iStack0020 = 2;") != string::npos);
++  ASSERT(text.find("segmentop(unaff_SS, piVar1) = 3;") != string::npos);
++  ASSERT(text.find("return aiStack_10[0] + iStack0020;") != string::npos);
++}
++
++TEST(segmented_conditional_stack_store_negative) {
++  checkConditionalStackStore("558bec83ec10c746f20100c7462202008d5ef2837e040075038d5e2236c70703008b46f2034622c9c3");
++}
++
++TEST(segmented_conditional_stack_store_positive) {
++  checkConditionalStackStore("558bec83ec10c746f20100c7462202008d5e22837e040075038d5ef236c70703008b46f2034622c9c3");
++}
++
+ TEST(segmented_independent_stack_selectors) {
+   SegmentedEnvironment::initialize();
+   istringstream image(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
