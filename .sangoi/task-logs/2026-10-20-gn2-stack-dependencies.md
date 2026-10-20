@@ -1,7 +1,7 @@
 # GN-2 stack dependency preservation
 
 Date: 2026-10-20
-Status: implementation and bounded validation complete; Code Gate pending.
+Status: complete; local Code Gate `PROCEED`.
 Intent owner: `.sangoi/planning/2026-10-20-gn2-stack-dependencies.md`.
 
 ## Authority and source
@@ -42,6 +42,24 @@ The integration scratch root is `/home/lucas/.cache/codex/r2ghidra/gn2-stack-dep
 
 The first invocation set the language directory only after loading the plugin, which emitted a missing-default-Sleigh-home startup diagnostic. The root inspected `SleighAsm::getSleighHome` and supplied its existing `SLEIGHHOME` environment input before plugin loading. The two successful observations used that input plus the explicit plugin config. No source correction, package installation or fallback runtime was needed. The failed assertion before inspecting the first output is not counted as a passing production observation.
 
-Bridge logs are in `logs/`; `logs/test.log` records the encoder result without requiring the inherited-environment dump. Compiler and Sleigh warnings remain in the build logs; their baseline delta was not assessed. Neither all processors nor network-only fetching was exercised. The unused initial setup directory remains as task-owned setup evidence. The Code Gate has not started.
+Bridge logs are in `logs/`; `logs/test.log` records the encoder result without requiring the inherited-environment dump. Compiler and Sleigh warnings remain in the build logs; their baseline delta was not assessed. Neither all processors nor network-only fetching was exercised. The unused initial setup directory remains as task-owned setup evidence.
+
+The exact production replay command, environment, both byte inputs and XML assertions are retained at one-based lines 427/430 of root session `01a15772-6cb8-7670-9ce2-e367137f77b0`, `/home/lucas/.codex/sessions/2026/10/20/rollout-2026-10-20T00-54-39-01a15772-6cb8-7670-9ce2-e367137f77b0.jsonl`, call ID `call_dlOgpF7qajamfHowoMuq99wX`. Line 427 contains the command; line 430 contains the observed successful output. No standalone production transcript or raw XML file was saved in the bridge evidence directory. The retained structured execution and native regression establish the bounded observation without another proof script or artifact.
 
 This result concerns the executed full/empty unknown-range dependency class. It does not establish solver convergence or correct every finite partial range, access-width overlap, numerical selector alias or real-mode alias. NE, union, MCP and host-runtime corrections are excluded. Remote availability of the local engine commit and a fresh network-only build are unverified. Original game files, global installations and upstream repositories were not changed.
+
+## Final review and follow-up classification
+
+The fixed reviewed candidates are engine `83c0c8d0f6392fea9ed2b269c541e6b0a61aa421` and bridge `b5667721e4f0694e2a03abda0c648b80fa4ba4fd`. Source pair `/root/gn2_source_senior` and `/root/gn2_source_claude` covered the native patch and its direct owner/test chain. Integration pair `/root/gn2_integration_senior` and `/root/gn2_integration_claude` covered the three task documents, two bridge pin changes, evidence adequacy and source/build/runtime seams. Both pairs completed independent assessments and reciprocal examination. Root analysis addressed all findings and limitations before the final cumulative Senior disposition.
+
+The integration Senior returned `PROCEED`, route condition `not-applicable`, at `2026-10-20T01:34:06.826-03:00` (America/Sao_Paulo), root rollout line 668. Semantic coverage is complete for the admitted six-path change set; no required correction, nit or indispensable gap remains. No participation or exchange was dispensed with, and no review override was used. The registered transition enters Closeout; no review rerun is required for this factual memorialization.
+
+- `bookkeeping memorialization`: record the final result and exact production-evidence locator. A review claim that the replay command was unavailable was falsified by the retained execution and explicitly retracted; no missing-evidence defect remains.
+- `deferred observation`: existing finite wrapped-range and discarded/very-large-finite-range handling may warrant a separately admitted production probe. These are pre-existing source hypotheses, not reproduced GN-2 regressions or selected corrections. Preserve their uncertainty.
+- `deferred observation`: exact printed-C expectations may need revision alongside a future authorized printer/type improvement. The current dataflow checks independently protect the demonstrated defect. An additional finite-index control and broad nonsegmented output/performance study are optional, not missing GN-2 acceptance.
+- `deferred observation`: the pre-existing product guide configures the language directory after plugin loading. A separate guide update can document the existing pre-load `SLEIGHHOME` input. The selected bridge change remains pin-only.
+- `deferred observation`: native Claude initial reviews did not fully honor the requested no-write behavior. The source call self-reported an unlocated plan summary. The integration call self-reported `/home/lucas/.claude/plans/review-whether-the-documentation-rippling-nest.md`; its existence, 2720-byte size and modification time `2026-10-20T01:28:49.125887373-03:00` were independently confirmed by the review lanes, while authorship rests on the self-report. No repository mutation was observed; reciprocal calls reported no further plan writes. No cleanup or harness change was attempted. The bounded follow-up owner is the native Claude workflow, not this decompiler patch.
+
+Required local non-substantive fixes: none. Substantive runtime/contract fixes: none selected. Bundle/proof corrections: none required. These classifications preserve the review evidence without turning an excluded hypothesis or optional improvement into implementation authority.
+
+The engine source correction, documentary evidence and bridge pin are separate honest local checkpoints. The bridge's pin and hardcoded product-document reference share one commit because neither should advertise a different engine revision. Matching private builds and failure evidence are retained for replay; no extra Git worktree was created. Final closeout changes only this log, the canonical plan and changelog.
