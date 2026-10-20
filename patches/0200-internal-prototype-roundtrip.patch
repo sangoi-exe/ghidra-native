@@ -1,0 +1,156 @@
+diff --git a/src/decompiler/fspec.cc b/src/decompiler/fspec.cc
+--- a/src/decompiler/fspec.cc
++++ b/src/decompiler/fspec.cc
+@@ -3424,23 +3424,6 @@
+
+ {
+   encoder.openElement(ELEM_INTERNALLIST);
+-  if (outparam != (ProtoParameter *)0) {
+-    encoder.openElement(ELEM_RETPARAM);
+-    if (outparam->isTypeLocked())
+-      encoder.writeBool(ATTRIB_TYPELOCK,true);
+-    outparam->getAddress().encode(encoder);
+-    outparam->getType()->encodeRef(encoder);
+-    encoder.closeElement(ELEM_RETPARAM);
+-  }
+-  else {
+-    encoder.openElement(ELEM_RETPARAM);
+-    encoder.openElement(ELEM_ADDR);
+-    encoder.closeElement(ELEM_ADDR);
+-    encoder.openElement(ELEM_VOID);
+-    encoder.closeElement(ELEM_VOID);
+-    encoder.closeElement(ELEM_RETPARAM);
+-  }
+-
+   for(int4 i=0;i<inparam.size();++i) {
+     ProtoParameter *param = inparam[i];
+     encoder.openElement(ELEM_PARAM);
+@@ -3489,7 +3472,7 @@
+     proto.firstVarArgSlot = decoder.readSignedInteger();
+   }
+   for(;;) { // This is only the input params
+-    uint4 subId = decoder.openElement();		// <retparam> or <param>
++    uint4 subId = decoder.openElement();		// <param>
+     if (subId == 0) break;
+     string name;
+     uint4 flags = 0;
+diff --git a/src/decompiler/fspec.hh b/src/decompiler/fspec.hh
+--- a/src/decompiler/fspec.hh
++++ b/src/decompiler/fspec.hh
+@@ -1233,16 +1233,16 @@
+   virtual ProtoParameter *getOutput(void)=0;		///< Get the return-value description
+   virtual ProtoStore *clone(void) const=0;		///< Clone the entire collection of parameter descriptions
+
+-  /// \brief Encode any parameters that are not backed by symbols to a stream
++  /// \brief Encode input parameters that are not backed by symbols to a stream
+   ///
+   /// Symbols are stored elsewhere, so symbol backed parameters are not serialized.
+-  /// If there are any internal parameters an \<internallist> element is emitted.
++  /// Internal inputs are encoded as \<param> children of \<internallist>; FuncProto encodes the return value separately.
+   /// \param encoder is the stream encoder
+   virtual void encode(Encoder &encoder) const=0;
+
+-  /// \brief Restore any internal parameter descriptions from a stream
+-  ///
+-  /// Parse an \<internallist> element containing \<param> and \<retparam> child elements.
++  /// \brief Restore internal input parameter descriptions from a stream
++  ///
++  /// Parse an \<internallist> element containing only \<param> child elements.
+   /// \param decoder is the stream decoder
+   /// \param model is prototype model for determining storage for unassigned parameters
+   virtual void decode(Decoder &decoder,ProtoModel *model)=0;
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -258,6 +258,91 @@
+   ASSERT_EQUALS(plain.declaration(functionPointer),"word (*value)(void)");
+   ASSERT_EQUALS(qualified.declaration(functionPointer),"word (far *value)(void)");
+   ASSERT(function->getPrototype()->hasMatchingModel(prototype.model));
++}
++
++static void assertInternalParameterRoundTrip(const ProtoParameter *expected,const ProtoParameter *actual) {
++  ASSERT_EQUALS(actual->getName(),expected->getName());
++  ASSERT_EQUALS(actual->getType()->getName(),expected->getType()->getName());
++  ASSERT_EQUALS(actual->getType()->getSize(),expected->getType()->getSize());
++  ASSERT_EQUALS(actual->getType()->getMetatype(),expected->getType()->getMetatype());
++  ASSERT_EQUALS(actual->isTypeLocked(),expected->isTypeLocked());
++  ASSERT_EQUALS(actual->isNameLocked(),expected->isNameLocked());
++  ASSERT_EQUALS(actual->isThisPointer(),expected->isThisPointer());
++  ASSERT_EQUALS(actual->isIndirectStorage(),expected->isIndirectStorage());
++  ASSERT_EQUALS(actual->isHiddenReturn(),expected->isHiddenReturn());
++  Address expectedAddress = expected->getAddress();
++  Address actualAddress = actual->getAddress();
++  ASSERT_EQUALS(actualAddress.isInvalid(),expectedAddress.isInvalid());
++  if (!expectedAddress.isInvalid()) {
++    ASSERT_EQUALS(actualAddress.getSpace()->getName(),expectedAddress.getSpace()->getName());
++    ASSERT_EQUALS(actualAddress.getOffset(),expectedAddress.getOffset());
++  }
++}
++
++static void assertInternalPrototypeRoundTrip(const Datatype *original) {
++  SegmentedEnvironment restored;
++  ASSERT_EQUALS(original->getId(),0);
++  ostringstream output;
++  XmlEncode encoder(output);
++  original->encodeRef(encoder);
++  istringstream input(output.str());
++  XmlDecode decoder(restored.arch);
++  decoder.ingestStream(input);
++  Datatype *decoded = restored.arch->types->decodeType(decoder);
++  ASSERT_EQUALS(decoded->getMetatype(),original->getMetatype());
++  ASSERT_EQUALS(decoded->getSize(),original->getSize());
++  if (original->getMetatype() == TYPE_PTR) {
++    const TypePointer *expectedPointer = (const TypePointer *)original;
++    const TypePointer *actualPointer = (const TypePointer *)decoded;
++    ASSERT_EQUALS(actualPointer->getWordSize(),expectedPointer->getWordSize());
++    original = expectedPointer->getPtrTo();
++    decoded = actualPointer->getPtrTo();
++  }
++  ASSERT_EQUALS(original->getId(),0);
++  ASSERT_EQUALS(original->getMetatype(),TYPE_CODE);
++  ASSERT_EQUALS(decoded->getMetatype(),TYPE_CODE);
++  const FuncProto *expected = ((const TypeCode *)original)->getPrototype();
++  const FuncProto *actual = ((const TypeCode *)decoded)->getPrototype();
++  ASSERT_EQUALS(actual->numParams(),expected->numParams());
++  ASSERT(actual->hasMatchingModel(restored.arch->getModel(expected->getModelName())));
++  ASSERT_EQUALS(actual->getExtraPop(),expected->getExtraPop());
++  ASSERT_EQUALS(actual->isModelLocked(),expected->isModelLocked());
++  ASSERT_EQUALS(actual->isInputLocked(),expected->isInputLocked());
++  ASSERT_EQUALS(actual->isOutputLocked(),expected->isOutputLocked());
++  assertInternalParameterRoundTrip(expected->getOutput(),actual->getOutput());
++  for(int4 i=0;i<expected->numParams();++i)
++    assertInternalParameterRoundTrip(expected->getParam(i),actual->getParam(i));
++  ASSERT(output.str().find("<returnsym") != string::npos);
++  ASSERT(output.str().find("<retparam") == string::npos);
++}
++
++TEST(internal_prototype_roundtrip) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  PrototypePieces signature;
++  signature.model = env.arch->getModel("__cdecl16near");
++  signature.outtype = factory->getBase(2,TYPE_INT);
++  signature.intypes.push_back(signature.outtype);
++  signature.innames.push_back("value");
++  signature.firstVarArgSlot = -1;
++  TypeCode *function = factory->getTypeCode(signature);
++  function->getPrototype()->getParam(0)->setNameLock(true);
++  assertInternalPrototypeRoundTrip(function);
++  assertInternalPrototypeRoundTrip(factory->getTypePointer(2,function,1));
++
++  signature.intypes.push_back(factory->getBase(1,TYPE_UINT));
++  signature.innames.push_back("mode");
++  function = factory->getTypeCode(signature);
++  function->getPrototype()->getParam(0)->setNameLock(true);
++  function->getPrototype()->getParam(1)->setTypeLock(false);
++  assertInternalPrototypeRoundTrip(function);
++  assertInternalPrototypeRoundTrip(factory->getTypePointer(4,function,1));
++
++  signature.intypes.clear();
++  signature.innames.clear();
++  function = factory->getTypeCode(signature);
++  assertInternalPrototypeRoundTrip(function);
++  assertInternalPrototypeRoundTrip(factory->getTypePointer(2,function,1));
+ }
+
+ TEST(segmented_spacebase) {
