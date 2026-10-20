@@ -1,8 +1,8 @@
 # Intent Contract: conservative native dependencies and prepared-source validity
 
-Status: active
+Status: complete
 Task mode: Doctrine
-Lifecycle phase: Remediation review
+Lifecycle phase: Closeout
 Strategy epoch: 1
 Plan kind: Bugfix / Regression Plan
 Secondary kind: Operations / Tooling Plan, limited to the existing patch-preparation lifecycle.
@@ -79,4 +79,8 @@ This selection enters Remediation review with unchanged Scope, architecture and 
 
 Remediation source is committed at engine `636c9bcdc31246f729bde1a3e4301634c327d366` and bridge `f1836d1369875ce59ba5f21020c01a6b4e6b2550`; bridge guidance checkpoint is `76866c4590e3fa2e3d31e70cbf58beadd0479499`. Actual Make-produced native objects now preserve preparation identity, and eight owner tests pass. The package build/reuse succeeds with Git absent after configuration. XPS Make object assembly and the XPS Meson helper accept matching reuse and refuse real source/patch mismatches without modifying prepared bytes or objects. Eight manager cases cover matching, protected refusal and fresh/clean preparation. Root ordinary-Make reuse, Make-to-Meson validation and six current Make-plugin C/XML observations also pass. The task log states the inherited configure/header prerequisites and the limits of these targeted XPS results; full host linkage is not claimed.
 
-Material decisions still open: none. Residual-risk acceptance: none. Gate override: none. Blocker: none. Next high-level action: fix the documentary candidate and obtain the local Remediation delta review for the committed corrections and direct evidence/guidance followers.
+The local `Senior Code Reviewer / Remediation delta review` on `/root/native_integration_senior` returned `PROCEED_AFTER_FIXES`, with complete semantic and cross-review coverage of sixteen changed paths plus one direct README follower. All six current native Claude assessments succeeded; no current-Gate participation dispensation applies. The sole required correction was mechanical propagation of the selected policy into two main bridge README paragraphs. Worker correction `da5b916d329a33da2356f4aea20103c8395a1b7f` changes only those paragraphs. Root comparison with the manager, exact diff inspection and whitespace checks pass. The registered mechanical-verification-only transition therefore enters Closeout without another semantic review. The verdict is not relabeled as `PROCEED`.
+
+F1–F3 and the required README follower are complete within the admitted result. Optional test-precision suggestions and inherited build-prerequisite limits remain disclosed observations, not missing implementation or accepted new obligations. Prepared/dirty ghidra-native revision transitions now require a fresh matching tree rather than automatic stashing. The engine pin remains the exact source checkpoint 636c9bc; later engine commits are documentary. All changes remain local, without publication or global installation.
+
+Material decisions still open: none. Residual-risk acceptance: none. Gate override: none. Blocker: none. Next high-level action: none; task complete within the recorded validation boundaries.
