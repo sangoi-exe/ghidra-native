@@ -1,0 +1,428 @@
+diff --git a/src/Processors/x86/data/languages/x86-16.cspec b/src/Processors/x86/data/languages/x86-16.cspec
+--- a/src/Processors/x86/data/languages/x86-16.cspec
++++ b/src/Processors/x86/data/languages/x86-16.cspec
+@@ -461,6 +461,134 @@
+       <register name="OF"/>
+     </killedbycall>
+   </prototype>
++  <!-- Exact-image TASM3.1 finite analysis contracts; normal valid noninterfering near/far frames only. -->
++  <!-- CF/AX/DX retain early-return values and conditional CBW/CWD, not a scalar flag ABI. -->
++  <prototype name="tasm31_sign_extension_state_16near" extrapop="2" stackshift="2">
++    <input>
++      <pentry minsize="2" maxsize="2"><register name="AX"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="DX"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="DS"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="ES"/></pentry>
++    </input>
++    <output>
++      <pentry minsize="1" maxsize="1"><register name="CF"/></pentry>
++      <pentry minsize="5" maxsize="5"><addr space="join" piece1="DX" piece2="AX" piece3="CF"/></pentry>
++    </output>
++    <unaffected>
++      <register name="BX"/>
++      <register name="CX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="ES"/>
++      <register name="SS"/>
++      <register name="CS"/>
++      <register name="DF"/>
++    </unaffected>
++    <killedbycall>
++      <register name="AX"/>
++      <register name="DX"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- ZF/AL retain direct-return AL; qualified optional far leaf may write memory, so this is not pure. -->
++  <prototype name="tasm31_current_state_16near" extrapop="2" stackshift="2">
++    <input>
++      <pentry minsize="1" maxsize="1"><register name="AL"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="DS"/></pentry>
++    </input>
++    <output>
++      <pentry minsize="1" maxsize="1"><register name="ZF"/></pentry>
++      <pentry minsize="2" maxsize="2"><addr space="join" piece1="AL" piece2="ZF"/></pentry>
++    </output>
++    <unaffected>
++      <register name="AH"/>
++      <register name="BX"/>
++      <register name="CX"/>
++      <register name="DX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="ES"/>
++      <register name="SS"/>
++      <register name="CS"/>
++      <register name="DF"/>
++    </unaffected>
++    <killedbycall>
++      <register name="AL"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- ZF/current DS/ES retain selectors consumed after the call. Unsaved AH/SI/BP/DI/DF/segments remain unknown, not preserved or blanket-killed. -->
++  <prototype name="tasm31_padding_state_16near" extrapop="2" stackshift="2">
++    <input>
++      <pentry minsize="2" maxsize="2"><register name="DS"/></pentry>
++      <pentry minsize="2" maxsize="2"><register name="ES"/></pentry>
++    </input>
++    <output>
++      <pentry minsize="1" maxsize="1"><register name="ZF"/></pentry>
++      <pentry minsize="5" maxsize="5"><addr space="join" piece1="ES" piece2="DS" piece3="ZF"/></pentry>
++    </output>
++    <unaffected>
++      <register name="BX"/>
++      <register name="CX"/>
++      <register name="DX"/>
++      <register name="SP"/>
++    </unaffected>
++    <killedbycall>
++      <register name="AL"/>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
++  <!-- Exact qualified074B leaf supporting F687; conditional memory write, no scalar result or memory-purity claim. -->
++  <prototype name="tasm31_conditional_store_16far" extrapop="4" stackshift="4">
++    <input>
++      <pentry minsize="2" maxsize="2"><register name="DS"/></pentry>
++    </input>
++    <output/>
++    <unaffected>
++      <register name="AX"/>
++      <register name="BX"/>
++      <register name="CX"/>
++      <register name="DX"/>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="ES"/>
++      <register name="SS"/>
++      <register name="CS"/>
++      <register name="DF"/>
++    </unaffected>
++    <killedbycall>
++      <register name="CF"/>
++      <register name="PF"/>
++      <register name="AF"/>
++      <register name="ZF"/>
++      <register name="SF"/>
++      <register name="OF"/>
++    </killedbycall>
++  </prototype>
+   <prototype name="__regcall" extrapop="2" stackshift="2">
+     <input>
+       <pentry minsize="1" maxsize="2">
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -673,3 +673,286 @@
++// Source-qualified RF08/TI04 storage/effects, separate from the decoded-body/caller tests below.
++static void checkTasm31Prototypes(const string &language)
++
++{
++  SegmentedEnvironment::initialize();
++  istringstream image("<binaryimage arch=\"x86:LE:16:" + language + ":default\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">c3</bytechunk></binaryimage>");
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  Datatype *byte = arch->types->getBase(1,TYPE_UINT);
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  Datatype *signState = qualifiedRecord(arch.get(),"Tasm31SignExtensionState5",5,{TypeField(0,0,"reject_cf",byte),TypeField(1,1,"ax",word),TypeField(2,3,"dx",word)});
++  Datatype *currentState = qualifiedRecord(arch.get(),"Tasm31CurrentState2",2,{TypeField(0,0,"zero_zf",byte),TypeField(1,1,"al",byte)});
++  Datatype *paddingState = qualifiedRecord(arch.get(),"Tasm31PaddingState5",5,{TypeField(0,0,"zero_zf",byte),TypeField(1,1,"ds",word),TypeField(2,3,"es",word)});
++  QualifiedPrototype sign(arch.get(),"tasm31_sign_extension_state_16near",2,signState,{word,word,word,word});
++  sign.expectRegister(1,"AX");
++  sign.expectRegister(2,"DX");
++  sign.expectRegister(3,"DS");
++  sign.expectRegister(4,"ES");
++  sign.expectJoin(0,{"DX","AX","CF"});
++  sign.expectEffects({"BX","CX","SP","BP","SI","DI","DS","ES","SS","CS","DF"},{"AX","DX","CF","PF","AF","ZF","SF","OF"});
++  QualifiedPrototype current(arch.get(),"tasm31_current_state_16near",2,currentState,{byte,word});
++  current.expectRegister(1,"AL");
++  current.expectRegister(2,"DS");
++  current.expectJoin(0,{"AL","ZF"});
++  current.expectEffects({"AH","BX","CX","DX","SP","BP","SI","DI","DS","ES","SS","CS","DF"},{"AL","CF","PF","AF","ZF","SF","OF"});
++  QualifiedPrototype padding(arch.get(),"tasm31_padding_state_16near",2,paddingState,{word,word});
++  padding.expectRegister(1,"DS");
++  padding.expectRegister(2,"ES");
++  padding.expectJoin(0,{"ES","DS","ZF"});
++  padding.expectEffects({"BX","CX","DX","SP"},{"AL","CF","PF","AF","ZF","SF","OF"});
++  QualifiedPrototype leaf(arch.get(),"tasm31_conditional_store_16far",4,arch->types->getTypeVoid(),{word});
++  leaf.expectRegister(1,"DS");
++  leaf.expectEffects({"AX","BX","CX","DX","SP","BP","SI","DI","DS","ES","SS","CS","DF"},{"CF","PF","AF","ZF","SF","OF"});
++  ProtoModel *model = arch->getModel("tasm31_padding_state_16near");
++  for(const char *name : {"AH","SI","BP","DI","DS","ES","SS","CS","DF"}) {
++    const VarnodeData &reg(arch->translate->getRegister(name));
++    ASSERT_EQUALS(model->hasEffect(reg.getAddr(),reg.size),EffectRecord::unknown_effect);
++  }
++}
++
++TEST(tasm31_prototypes_protected) {
++  checkTasm31Prototypes("Protected Mode");
++}
++
++TEST(tasm31_prototypes_real) {
++  checkTasm31Prototypes("Real Mode");
++}
++
++static bool tasm31DependsOn(Varnode *value,Varnode *source)
++
++{
++  vector<Varnode *> pending(1,value);
++  set<Varnode *> visited;
++  while(!pending.empty()) {
++    Varnode *current = pending.back();
++    pending.pop_back();
++    if (current == source) return true;
++    if (!visited.insert(current).second || !current->isWritten()) continue;
++    PcodeOp *op = current->getDef();
++    for(int4 i=0;i<op->numInput();++i)
++      pending.push_back(op->getIn(i));
++  }
++  return false;
++}
++
++// Original RF08 [8c61,8c90) and TI01 [461e,4694) machine bodies, at qualified logical offsets in an analysis CS domain.
++// Opaque descendants are declarations only; their behavior is not simulated or certified by this test.
++static void checkTasm31DecodedContracts(const string &language)
++
++{
++  SegmentedEnvironment::initialize();
++  istringstream image("<binaryimage arch=\"x86:LE:16:" + language + ":default\">"
++    "<bytechunk space=\"ram\" offset=\"0x10008c61\" readonly=\"true\">26833e060000752526f606040004751d26a00a0098263a260b007511f6065e70047501c399263b160c007501c3f9c3</bytechunk>"
++    "<bytechunk space=\"ram\" offset=\"0x1000461e\" readonly=\"true\">a150708b1652708bd88bca2b0656701b165870723e23c07439833ec443007413f606d643087505e84c00eb1550e8b8af58751ff706647008007406b95f80e860ec8bc806e838f0b090e88cfae2f9e867f007c3891e5670890e5870833ec44300740cf606d643087505e80a00ebe4b93200e82decebdc</bytechunk></binaryimage>");
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  AddrSpace *ram = arch->getDefaultCodeSpace();
++  Scope *global = arch->symboltab->getGlobalScope();
++  Datatype *byte = arch->types->getBase(1,TYPE_UINT);
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  Datatype *signState = qualifiedRecord(arch.get(),"Tasm31SignExtensionState5",5,{TypeField(0,0,"reject_cf",byte),TypeField(1,1,"ax",word),TypeField(2,3,"dx",word)});
++  Datatype *paddingState = qualifiedRecord(arch.get(),"Tasm31PaddingState5",5,{TypeField(0,0,"zero_zf",byte),TypeField(1,1,"ds",word),TypeField(2,3,"es",word)});
++  Funcdata *sign = global->addFunction(Address(ram,0x10008c61),"tasm31_push_sign_extension_cf")->getFunction();
++  Funcdata *gate = global->addFunction(Address(ram,0x1000f606),"tasm31_padding_gate_zf")->getFunction();
++  Funcdata *caller = global->addFunction(Address(ram,0x1000461e),"tasm31_conditional_nop_fill")->getFunction();
++  PrototypePieces pieces;
++  pieces.model = arch->getModel("tasm31_sign_extension_state_16near");
++  pieces.outtype = signState;
++  pieces.intypes = {word,word,word,word};
++  pieces.innames = {"entry_ax","entry_dx","entry_ds","entry_es"};
++  pieces.firstVarArgSlot = -1;
++  sign->getFuncProto().setPieces(pieces);
++  pieces.model = arch->getModel("tasm31_padding_state_16near");
++  pieces.outtype = paddingState;
++  pieces.intypes = {word,word};
++  pieces.innames = {"entry_ds","entry_es"};
++  gate->getFuncProto().setPieces(pieces);
++  // These unrelated targets remain opaque; only normal call structure is needed for this caller observation.
++  for(uintb offset : {0x4694,0x32bf,0x369d,0x40f6,0x36d6})
++    global->addFunction(Address(ram,0x10000000 + offset),"opaque_" + to_string(offset));
++  arch->allacts.getCurrent()->reset(*sign);
++  ASSERT(arch->allacts.getCurrent()->perform(*sign) >= 0);
++  ASSERT_EQUALS(sign->numCalls(),0);
++  Varnode *entryAX = sign->findVarnodeInput(2,arch->translate->getRegister("AX").getAddr());
++  Varnode *entryDX = sign->findVarnodeInput(2,arch->translate->getRegister("DX").getAddr());
++  ASSERT(entryAX != (Varnode *)0);
++  ASSERT(entryDX != (Varnode *)0);
++  bool retainsAX = false;
++  bool retainsDX = false;
++  int4 returns = 0;
++  for(PcodeOpTree::const_iterator iter=sign->beginOpAll();iter!=sign->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->code() != CPUI_RETURN) continue;
++    ASSERT_EQUALS(op->numInput(),2);
++    ASSERT_EQUALS(op->getIn(1)->getSize(),5);
++    retainsAX = retainsAX || tasm31DependsOn(op->getIn(1),entryAX);
++    retainsDX = retainsDX || tasm31DependsOn(op->getIn(1),entryDX);
++    ++returns;
++  }
++  ASSERT(returns > 0);
++  ASSERT(retainsAX);
++  ASSERT(retainsDX);
++  arch->allacts.getCurrent()->reset(*caller);
++  ASSERT(arch->allacts.getCurrent()->perform(*caller) >= 0);
++  FuncCallSpecs *spec = (FuncCallSpecs *)0;
++  for(int4 i=0;i<caller->numCalls();++i) {
++    FuncCallSpecs *candidate = caller->getCallSpecs(i);
++    if (candidate->getOp()->getAddr() == Address(ram,0x1000464b)) spec = candidate;
++  }
++  ASSERT(spec != (FuncCallSpecs *)0);
++  ASSERT_EQUALS(spec->getEntryAddress(),gate->getAddress());
++  ASSERT_EQUALS(spec->getModelName(),"tasm31_padding_state_16near");
++  PcodeOp *call = spec->getOp();
++  ASSERT_EQUALS(call->numInput(),3);
++  ASSERT(call->getOut() != (Varnode *)0);
++  ASSERT_EQUALS(call->getOut()->getSize(),5);
++  bool flagBranch = false;
++  bool currentSelector = false;
++  bool savesCurrentES = false;
++  for(PcodeOpTree::const_iterator iter=caller->beginOpAll();iter!=caller->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead()) continue;
++    if (op->code() == CPUI_CBRANCH && op->getAddr() == Address(ram,0x1000464f)) {
++      ASSERT(tasm31DependsOn(op->getIn(1),call->getOut()));
++      flagBranch = true;
++    }
++    if (op->code() == CPUI_SEGMENTOP && op->getAddr() == Address(ram,0x10004651)) {
++      ASSERT(tasm31DependsOn(op->getIn(1),call->getOut()));
++      currentSelector = true;
++    }
++    if (op->code() == CPUI_STORE && op->getAddr() == Address(ram,0x10004661)) {
++      ASSERT(tasm31DependsOn(op->getIn(2),call->getOut()));
++      savesCurrentES = true;
++    }
++  }
++  ASSERT(savesCurrentES);
++  ASSERT(flagBranch);
++  ASSERT(currentSelector);
++  ostringstream output;
++  arch->print->setOutputStream(&output);
++  arch->print->docFunction(sign);
++  arch->print->docFunction(caller);
++  arch->print->setOutputStream((ostream *)0);
++  ASSERT(output.str().find("reject_cf") != string::npos);
++  ASSERT(output.str().find("zero_zf") != string::npos);
++}
++
++// Actual TI04 F687 and074B bodies with their explicit source-qualified contracts, not synthetic leaf behavior.
++static void checkTasm31CurrentBody(const string &language)
++
++{
++  SegmentedEnvironment::initialize();
++  uintb leafOffset = language == "Protected Mode" ? 0x0f90074b : 0x1004b;
++  ostringstream imageText;
++  imageText << "<binaryimage arch=\"x86:LE:16:" << language << ":default\">"
++    "<bytechunk space=\"ram\" offset=\"0x1000f687\" readonly=\"true\">f606d64301740cf606a0700175059a4b07900f803eaf70007501c3f606d64301740cf606a0701075099a4b07900f32c0fec8c3</bytechunk>"
++    "<bytechunk space=\"ram\" offset=\"0x" << hex << leafOffset << "\" readonly=\"true\">f606c343807505c606984501cb</bytechunk></binaryimage>";
++  istringstream image(imageText.str());
++  DocumentStorage store;
++  Document *doc = store.parseDocument(image);
++  store.registerTag(doc->getRoot());
++  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  arch->init(store);
++  AddrSpace *ram = arch->getDefaultCodeSpace();
++  Scope *global = arch->symboltab->getGlobalScope();
++  Funcdata *leaf = global->addFunction(Address(ram,leafOffset),"tasm31_conditional_store_leaf")->getFunction();
++  Funcdata *current = global->addFunction(Address(ram,0x1000f687),"tasm31_current_state_predicate_zf")->getFunction();
++  Datatype *byte = arch->types->getBase(1,TYPE_UINT);
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  Datatype *state = qualifiedRecord(arch.get(),"Tasm31CurrentState2",2,{TypeField(0,0,"zero_zf",byte),TypeField(1,1,"al",byte)});
++  PrototypePieces pieces;
++  pieces.model = arch->getModel("tasm31_current_state_16near");
++  pieces.outtype = state;
++  pieces.intypes = {byte,word};
++  pieces.innames = {"entry_al","entry_ds"};
++  pieces.firstVarArgSlot = -1;
++  current->getFuncProto().setPieces(pieces);
++  pieces.model = arch->getModel("tasm31_conditional_store_16far");
++  pieces.outtype = arch->types->getTypeVoid();
++  pieces.intypes = {word};
++  pieces.innames = {"entry_ds"};
++  leaf->getFuncProto().setPieces(pieces);
++  // Decode the original far leaf as well as using its model at both actual F687 calls.
++  arch->allacts.getCurrent()->reset(*leaf);
++  ASSERT(arch->allacts.getCurrent()->perform(*leaf) >= 0);
++  ASSERT_EQUALS(leaf->getFuncProto().getExtraPop(),4);
++  int4 leafStores = 0;
++  int4 leafReturns = 0;
++  for(PcodeOpTree::const_iterator iter=leaf->beginOpAll();iter!=leaf->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead()) continue;
++    if (op->code() == CPUI_STORE) {
++      ASSERT_EQUALS(op->getAddr(),Address(ram,leafOffset + 7));
++      ASSERT(op->getIn(2)->isConstant());
++      ASSERT_EQUALS(op->getIn(2)->getOffset(),1);
++      ++leafStores;
++    }
++    if (op->code() == CPUI_RETURN) {
++      ASSERT_EQUALS(op->numInput(),1);
++      ++leafReturns;
++    }
++  }
++  ASSERT_EQUALS(leafStores,1);
++  ASSERT_EQUALS(leafReturns,1);
++  arch->allacts.getCurrent()->reset(*current);
++  ASSERT(arch->allacts.getCurrent()->perform(*current) >= 0);
++  ASSERT_EQUALS(current->numCalls(),2);
++  for(int4 i=0;i<current->numCalls();++i) {
++    FuncCallSpecs *call = current->getCallSpecs(i);
++    ASSERT_EQUALS(call->getEntryAddress(),leaf->getAddress());
++    ASSERT_EQUALS(call->getModelName(),"tasm31_conditional_store_16far");
++    ASSERT_EQUALS(call->getExtraPop(),4);
++    ASSERT_EQUALS(call->getEffectiveExtraPop(),4);
++    ASSERT(call->getOp()->getOut() == (Varnode *)0);
++    ASSERT_EQUALS(call->getOp()->numInput(),2);
++    ASSERT_EQUALS(call->getOp()->getIn(1),current->findVarnodeInput(2,arch->translate->getRegister("DS").getAddr()));
++    for(const char *name : {"AL","AH","AX","BX","CX","DX","BP","SI","DI","DS","ES","SS","CS","DF"}) {
++      const VarnodeData &reg(arch->translate->getRegister(name));
++      ASSERT_EQUALS(call->hasEffect(reg.getAddr(),reg.size),EffectRecord::unaffected);
++    }
++  }
++  Varnode *fresh = (Varnode *)0;
++  PcodeOp *branch = (PcodeOp *)0;
++  int4 returns = 0;
++  for(PcodeOpTree::const_iterator iter=current->beginOpAll();iter!=current->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead()) continue;
++    if (op->code() == CPUI_LOAD && op->getAddr() == Address(ram,0x1000f69a)) fresh = op->getOut();
++    if (op->code() == CPUI_CBRANCH && op->getAddr() == Address(ram,0x1000f69f)) branch = op;
++    if (op->code() == CPUI_RETURN) {
++      ASSERT_EQUALS(op->numInput(),2);
++      ASSERT_EQUALS(op->getIn(1)->getSize(),2);
++      ++returns;
++    }
++  }
++  ASSERT(fresh != (Varnode *)0);
++  ASSERT(branch != (PcodeOp *)0);
++  ASSERT(tasm31DependsOn(branch->getIn(1),fresh));
++  ASSERT(returns > 0);
++}
++
++TEST(tasm31_current_body_protected) {
++  checkTasm31CurrentBody("Protected Mode");
++}
++
++TEST(tasm31_current_body_real) {
++  checkTasm31CurrentBody("Real Mode");
++}
++
++TEST(tasm31_decoded_contracts_protected) {
++  checkTasm31DecodedContracts("Protected Mode");
++}
++
++TEST(tasm31_decoded_contracts_real) {
++  checkTasm31DecodedContracts("Real Mode");
++}
++
+ TEST(call_continuation_override) {
+   SegmentedEnvironment::initialize();
+   // The caller supplies a qualified resume; these decoded bytes test the operation, not helper/prefix qualification.
