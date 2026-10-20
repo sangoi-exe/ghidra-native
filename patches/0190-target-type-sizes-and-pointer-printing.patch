@@ -185,7 +185,7 @@ diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
 diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -104,6 +104,124 @@
+@@ -104,6 +104,161 @@
      return output.str();
    }
  };
@@ -204,6 +204,43 @@ diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
 +  ASSERT_EQUALS(factory->getSizeOfLongDouble(),10);
 +  ASSERT_EQUALS(factory->getSizeOfPointer(),2);
 +  ASSERT_EQUALS(factory->getSizeOfAltPointer(),4);
++}
++
++TEST(target_long_double_stride) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  TypeFactory defaults(env.arch);
++  defaults.setupSizes();
++  for(uint4 size=0;size<=32;++size) {
++    ASSERT_EQUALS(factory->getAlignment(size),size == 10 ? 2 : defaults.getAlignment(size));
++    ASSERT_EQUALS(factory->getPrimitiveAlignSize(size),size == 10 ? 10 : defaults.getPrimitiveAlignSize(size));
++  }
++  ASSERT_EQUALS(factory->getAlignment(0x1000),defaults.getAlignment(0x1000));
++
++  Datatype *longDouble = factory->getBase(factory->getSizeOfLongDouble(),TYPE_FLOAT);
++  ASSERT_EQUALS(longDouble->getSize(),10);
++  ASSERT_EQUALS(longDouble->getAlignSize(),10);
++  ASSERT_EQUALS(longDouble->getAlignment(),2);
++  TypeArray *pair = factory->getTypeArray(2,longDouble);
++  ASSERT_EQUALS(pair->getSize(),20);
++  ASSERT_EQUALS(pair->getAlignSize(),20);
++  ASSERT_EQUALS(pair->getAlignment(),2);
++
++  for(int4 size=1;size<=8;size*=2) {
++    Datatype *scalar = factory->getBase(size,TYPE_UINT);
++    ASSERT_EQUALS(scalar->getSize(),size);
++    ASSERT_EQUALS(scalar->getAlignSize(),size);
++    ASSERT_EQUALS(scalar->getAlignment(),defaults.getAlignment(size));
++    ASSERT_EQUALS(factory->getTypeArray(2,scalar)->getSize(),2*size);
++  }
++  Datatype *word = factory->getBase(2,TYPE_UINT);
++  for(int4 size=2;size<=4;size*=2) {
++    TypePointer *pointer = factory->getTypePointer(size,word,1);
++    ASSERT_EQUALS(pointer->getSize(),size);
++    ASSERT_EQUALS(pointer->getAlignSize(),size);
++    ASSERT_EQUALS(pointer->getAlignment(),defaults.getAlignment(size));
++    ASSERT_EQUALS(factory->getTypeArray(2,pointer)->getSize(),2*size);
++  }
 +}
 +
 +TEST(target_fundamental_size_defaults) {
@@ -350,13 +387,13 @@ diff --git a/src/Processors/x86/data/languages/x86-16.cspec b/src/Processors/x86
 +	<float_size value="4" />
 +	<double_size value="8" />
 +	<long_double_size value="10" />
-+	<!-- alignment varies between MIcrosoft and Borland -->
-+	<!--
++	<!-- Preserve generic primitive alignments except for ten-byte storage. -->
 +	<size_alignment_map>
 +		<entry size="1" alignment="1" />
 +		<entry size="2" alignment="2" />
-+		<entry size="4" alignment="2" />
-+		<entry size="8" alignment="2" />
++		<entry size="4" alignment="4" />
++		<entry size="8" alignment="8" />
++		<entry size="10" alignment="2" />
++		<entry size="11" alignment="8" />
 +	</size_alignment_map>
-+	-->
    </data_organization>
