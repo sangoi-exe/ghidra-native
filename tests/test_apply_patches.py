@@ -64,6 +64,7 @@ class PatchPreparationTests(unittest.TestCase):
         self.assertEqual((self.root / 'patch.done').read_bytes(), marker)
 
     def test_prepared_distribution_without_git(self):
+        (self.root / 'src/decompiler/marshal.o').write_bytes(b'local object output')
         shutil.rmtree(self.root / '.git')
         env = dict(os.environ, PATH=self.directory.name)
         self.assertIsNone(shutil.which('git', path=env['PATH']))
@@ -73,6 +74,20 @@ class PatchPreparationTests(unittest.TestCase):
         result = self.run_preparation('--check', str(stamp), env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(stamp.exists())
+
+    def test_native_objects_preserve_preparation(self):
+        (self.root / 'src/decompiler/marshal.o').write_bytes(b'local object output')
+        sources = self.sources()
+        marker = (self.root / 'patch.done').read_bytes()
+        result = self.run_preparation()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_preparation('--check', str(Path(self.directory.name) / 'checked.h'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.sources(), sources)
+        self.assertEqual((self.root / 'patch.done').read_bytes(), marker)
+        source = self.root / 'src/decompiler/marshal.cc'
+        source.write_bytes(source.read_bytes() + b'\n// user edit\n')
+        self.assert_refused()
 
     @unittest.skipUnless(os.environ.get('SLEIGHC'), 'set SLEIGHC to the native Sleigh compiler')
     def test_compiled_languages_preserve_preparation(self):
@@ -97,9 +112,13 @@ class PatchPreparationTests(unittest.TestCase):
         self.assert_refused()
 
     def test_source_edit_is_preserved(self):
-        source = self.root / 'src/decompiler/heritage.cc'
-        source.write_bytes(source.read_bytes() + b'\n// user edit\n')
-        self.assert_refused()
+        for name in ['src/decompiler/heritage.cc', 'src/decompiler/heritage.hh', 'src/Processors/x86/data/languages/ia.sinc']:
+            with self.subTest(source=name):
+                source = self.root / name
+                original = source.read_bytes()
+                source.write_bytes(original + b'\n// user edit\n')
+                self.assert_refused()
+                source.write_bytes(original)
 
     def test_old_empty_marker_is_not_accepted(self):
         (self.root / 'patch.done').write_bytes(b'')

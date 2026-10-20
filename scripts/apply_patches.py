@@ -17,10 +17,13 @@ def fingerprint(root, paths):
 
 def source_files(root):
     processors = root / 'src/Processors'
+    decompiler = root / 'src/decompiler'
     for path in (root / 'src').rglob('*'):
         if not path.is_file():
             continue
         if path.suffix == '.sla' and processors in path.parents and path.with_suffix('.slaspec').is_file():
+            continue
+        if path.suffix == '.o' and path.parent == decompiler and path.with_suffix('.cc').is_file():
             continue
         yield path
 
