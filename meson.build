@@ -5,7 +5,16 @@ project('ghidra-native', 'cpp',
   default_options: ['cpp_std=c++14', 'werror=false'])
 
 python = find_program('python3', 'python', required: true)
-run_command(python, files('scripts/apply_patches.py'), check: true)
+patch_runner = files('scripts/apply_patches.py')
+preparation = run_command(python, patch_runner, check: false)
+if preparation.returncode() != 0
+  error(preparation.stderr())
+endif
+preparation_check = custom_target('check-patch-preparation',
+  output: 'patch-checked.h',
+  command: [python, patch_runner, '--check', '@OUTPUT@'],
+  build_always_stale: true,
+  build_by_default: true)
 
 source_reader = files('scripts/sources.py')
 # Track the manifest so source-set edits regenerate the build definition.
@@ -19,7 +28,7 @@ foreach source_set : [
   ['SLEIGH_COMPILER', 'sleigh_compiler_sources'],
 ]
   names = run_command(python, source_reader, 'GHIDRA_' + source_set[0] + '_SRCS', check: true).stdout().strip().split()
-  sources = []
+  sources = [preparation_check]
   foreach name : names
     sources += files('src/decompiler/' + name)
   endforeach
@@ -48,7 +57,7 @@ slgh_static = static_library('slgh', slgh_sources,
 libdecomp_static = static_library('libdecomp', libdecomp_sources,
   dependencies: zlib, link_with: [ghidra_decompiler_static, slgh_static],
   include_directories: incs, implicit_include_directories: false)
-ghidra_dep = declare_dependency(link_with: libdecomp_static,
+ghidra_dep = declare_dependency(link_with: libdecomp_static, sources: preparation_check,
   include_directories: incs, dependencies: zlib)
 ghidra_embedded_static = static_library('ghidra-embedded', ghidra_sources,
   dependencies: zlib, link_with: libdecomp_static,

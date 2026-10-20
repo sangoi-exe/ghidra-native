@@ -13,9 +13,7 @@ mrproper: clean
 
 update sync: sync-processors sync-decompiler
 
-patch: patch.done
-
-patch.done:
+patch:
 	$(PYTHON) scripts/apply_patches.py
 
 test: patch

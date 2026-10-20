@@ -1,5 +1,6 @@
 decompiler_test = executable('decompiler_test',
   'main.cc',
+  preparation_check,
   '../src/unittests/paramactive.cc',
   '../src/unittests/pcodeinject.cc',
   '../src/unittests/testsegmented.cc',
@@ -10,7 +11,7 @@ decompiler_test = executable('decompiler_test',
   link_with: [ghidra_base_static, ghidra_decompiler_static, slgh_static, libdecomp_static])
 
 x86_languages = processor_dir / 'x86' / 'data' / 'languages'
-foreach spec : ['x86.ldefs', 'x86-16.pspec', 'x86-16-real.pspec', 'x86-16.cspec']
+foreach spec : ['x86.ldefs', 'x86-16.pspec', 'x86-16-real.pspec', 'x86-16.cspec', 'x86.pspec', 'x86gcc.cspec']
   configure_file(input: x86_languages / spec, output: spec, copy: true)
 endforeach
 x86_test_sla = custom_target('x86-test-sla',
@@ -21,3 +22,7 @@ x86_test_sla = custom_target('x86-test-sla',
 test('ghidra-native-unittests', decompiler_test,
   depends: x86_test_sla,
   env: ['SLEIGHHOME=' + meson.current_build_dir()])
+
+test('patch-preparation', python, args: files('test_apply_patches.py'),
+  depends: sleighc_exe,
+  env: ['SLEIGHC=' + sleighc_exe.full_path()])
