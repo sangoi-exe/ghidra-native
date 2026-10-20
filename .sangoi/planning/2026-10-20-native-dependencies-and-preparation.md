@@ -1,6 +1,6 @@
 # Intent Contract: conservative native dependencies and prepared-source validity
 
-Status: active
+Status: on-hold
 Task mode: Doctrine
 Lifecycle phase: Implementation
 Strategy epoch: 1
@@ -67,4 +67,12 @@ The dependency correction is checkpointed at `a3a4d7682d8474594c9a9b567f19fdd9b8
 
 A fresh combined bridge build consumes exact engine source commit `a3a4d7682d8474594c9a9b567f19fdd9b8cee21f`; its native suite passes 28/28, preparation suite 7/7 with no skips, and pcode XML passes. Matching Make/Meson reuse after DATA/x86 generation succeeds without changing preparation identity. Root independently reran the combined native driver and observed six production C/XML cases, including the old full/empty, new flat32 and both nonwrapping width directions. Bridge pin/guidance checkpoint is `25af7bdd2b6f334493551d26cf0d51dc5f13798c`; workspace guidance checkpoint is `5981cfc8d1504759949f167209beea4ef2977184`.
 
-Material decisions still open: none. Residual-risk acceptance: none. Gate override: none. Blocker: none. Next high-level action: commit the documentary candidate and complete the partitioned paired local Code Gate for the fixed result.
+## Current Code Gate and pending decision
+
+The paired local `Senior Code Reviewer / Task change-set review` reached its single final cumulative disposition on `/root/native_integration_senior`: `DO_NOT_PROCEED`, route condition `user-decision`. The fixed review candidates were engine `35d5b046bb3d06b43fc5219d584846e0f0a3e3e5`, bridge `25af7bdd2b6f334493551d26cf0d51dc5f13798c` and host guidance `5981cfc8d1504759949f167209beea4ef2977184`. Required Senior semantic coverage accounts for all sixteen changed paths. Actual Claude usage-limit failures and the root's scoped participation dispensations are recorded in the task log; absent contributions are not approval or agreement.
+
+The runtime correction remains supported. Three material preparation findings remain: normal bridge Make-generated native objects invalidate source identity; XPS and packaged bridge Make consumers bypass preparation checks on reuse; and the bridge manager can stash, check out and remove the marker before safe refusal. These findings follow direct source paths. Full bridge Make, manager, XPS and packaged-distribution failure executions were not performed. Native-only Make and combined Meson success do not close those paths.
+
+The root recommends correcting the existing preparation owner and direct build followers while retaining the selected safe-refusal policy. No material remediation has been selected by the current user. Do not implement, amend the selected route or launch another Gate while this decision is pending. This status update records the review result only; it does not change Scope, architecture or the confirmed preparation policy.
+
+Material decisions still open: current-user disposition of preparation findings F1–F3. Residual-risk acceptance: none. Gate override: none. Blocker: the substantive correction decision is pending. Next high-level action: present the verified findings and recommended closure to the current user.
