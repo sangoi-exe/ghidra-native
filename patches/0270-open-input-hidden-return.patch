@@ -1,0 +1,290 @@
+diff --git a/src/decompiler/fspec.hh b/src/decompiler/fspec.hh
+--- a/src/decompiler/fspec.hh
++++ b/src/decompiler/fspec.hh
+@@ -1367,4 +1367,5 @@
+   int4 returnBytesConsumed;	///< Number of bytes of return value that are consumed by callers (0 = all bytes)
+   void updateThisPointer(void);	///< Make sure any "this" parameter is properly marked
++  bool isHiddenReturnInput(const Address &addr,int4 size,int4 numInputs) const;	///< Match retained return-derived input storage
+   void encodeEffect(Encoder &encoder) const;		///< Encode any overriding EffectRecords to stream
+   void encodeLikelyTrash(Encoder &encoder) const;	///< Encode any overriding likelytrash registers to stream
+@@ -1480,5 +1481,5 @@
+   void resolveExtraPop(void);
+
+-  void clearUnlockedInput(void);		///< Clear input parameters that have not been locked
++  void clearUnlockedInput(void);		///< Clear recoverable inputs, retaining return-derived constraints
+   void clearUnlockedOutput(void);		///< Clear the return value if it has not been locked
+   void clearInput(void);			///< Clear all input parameters regardless of lock
+diff --git a/src/decompiler/fspec.cc b/src/decompiler/fspec.cc
+--- a/src/decompiler/fspec.cc
++++ b/src/decompiler/fspec.cc
+@@ -3981,5 +3981,23 @@
+ {
+   if (isInputLocked()) return;
+-  store->clearAllInputs();
++  if (!isOutputLocked()) {
++    store->clearAllInputs();
++    return;
++  }
++  for(int4 i=numParams()-1;i>=0;--i) {
++    if (!getParam(i)->isHiddenReturn())
++      store->clearInput(i);
++  }
++}
++
++bool FuncProto::isHiddenReturnInput(const Address &addr,int4 size,int4 numInputs) const
++
++{
++  for(int4 i=0;i<numInputs;++i) {
++    ProtoParameter *param = getParam(i);
++    if (param->getAddress() == addr && param->getSize() == size)
++      return true;
++  }
++  return false;
+ }
+
+@@ -4031,5 +4049,5 @@
+ /// given a list of Varnodes and their associated trial information,
+ /// create an input parameter for each trial in order, grabbing data-type
+-/// information from the Varnode.  Any old input parameters are cleared.
++/// information from the Varnode. Return-derived input constraints are retained.
+ /// \param data is the function containing the trial Varnodes
+ /// \param triallist is the list of Varnodes
+@@ -4039,6 +4057,7 @@
+ {
+   if (isInputLocked()) return;	// Input is locked, do no updating
+-  store->clearAllInputs();
+-  int4 count = 0;
++  clearUnlockedInput();
++  int4 numRetained = numParams();
++  int4 count = numRetained;
+   int4 numtrials = activeinput->getNumTrials();
+   for(int4 i=0;i<numtrials;++i) {
+@@ -4047,4 +4066,8 @@
+       Varnode *vn = triallist[trial.getSlot()-1];
+       if (vn->isMark()) continue;
++      if (isHiddenReturnInput(trial.getAddress(),trial.getSize(),numRetained)) {
++	vn->setMark();
++	continue;
++      }
+       ParameterPieces pieces;
+       if (vn->isPersist()) {
+@@ -4083,6 +4106,7 @@
+ {
+   if (isInputLocked()) return;	// Input is locked, do no updating
+-  store->clearAllInputs();
+-  int4 count = 0;
++  clearUnlockedInput();
++  int4 numRetained = numParams();
++  int4 count = numRetained;
+   int4 numtrials = activeinput->getNumTrials();
+   TypeFactory *factory = data.getArch()->types;
+@@ -4092,4 +4116,8 @@
+       Varnode *vn = triallist[trial.getSlot()-1];
+       if (vn->isMark()) continue;
++      if (isHiddenReturnInput(trial.getAddress(),trial.getSize(),numRetained)) {
++	vn->setMark();
++	continue;
++      }
+       ParameterPieces pieces;
+       if (vn->isPersist()) {
+diff --git a/src/decompiler/coreaction.cc b/src/decompiler/coreaction.cc
+--- a/src/decompiler/coreaction.cc
++++ b/src/decompiler/coreaction.cc
+@@ -4891,13 +4891,14 @@
+     }
+   }
+
+-  // Force locked inputs to exist as varnodes
++  // Force locked and return-derived inputs to exist as varnodes
+
+   // This is needed if we want to force a big input to exist
+   // but only part of it is getting used. This is allows
+   // a SUBPIECE instruction to get built with the big variable
+   // as input and the part getting used as output.
+-  if (data.getFuncProto().isInputLocked()) {
++  bool inputLocked = data.getFuncProto().isInputLocked();
++  if (inputLocked || data.getFuncProto().isOutputLocked()) {
+
+     int4 ptr_size = spc->isTruncated() ? spc->getAddrSize() : 0; // Check if we need to do pointer trimming
+     BlockBasic *topbl = (BlockBasic *)0;
+@@ -4907,9 +4908,13 @@
+     int4 numparams = data.getFuncProto().numParams();
+     for(int4 i=0;i<numparams;++i) {
+       ProtoParameter *param = data.getFuncProto().getParam(i);
++      if (!inputLocked && !param->isHiddenReturn())
++	continue;
+       Varnode *vn = data.newVarnode( param->getSize(), param->getAddress());
+       vn = data.setInputVarnode(vn);
+       vn->setLockedInput();
++      if (param->isHiddenReturn() && data.getFuncProto().isOutputLocked())
++	vn->updateType(param->getType(),true,true);
+       if (topbl != (BlockBasic *)0)
+-	extendInput(data,vn,param,topbl);
++	extendInput(data,vn,param,topbl);
+       if (ptr_size > 0) {
+@@ -4941,8 +4946,8 @@
+       if (data.getFuncProto().possibleInputParam(vn->getAddr(),vn->getSize())) {
+-	int4 slot = active.getNumTrials();
++	int4 slot = active.getNumTrials();
+-	active.registerTrial(vn->getAddr(),vn->getSize());
++	active.registerTrial(vn->getAddr(),vn->getSize());
+-	if (!vn->hasNoDescend())
+-	  active.getTrial(slot).markActive(); // Mark as active if it has descendants
++	if (!vn->hasNoDescend() || vn->isLockedInput())
++	  active.getTrial(slot).markActive(); // Referenced or required input
+-	triallist.push_back(vn);
++	triallist.push_back(vn);
+       }
+     }
+diff --git a/src/decompiler/database.cc b/src/decompiler/database.cc
+--- a/src/decompiler/database.cc
++++ b/src/decompiler/database.cc
+@@ -2147,2 +2147,5 @@
+     Symbol *sym = *iter++;
++    if (sym->getCategory() == Symbol::function_parameter && sym->isHiddenReturn() &&
++	fd != (Funcdata *)0 && fd->getFuncProto().isOutputLocked())
++      continue;
+     if (sym->isTypeLocked()) {	// Only hold if TYPE locked
+@@ -2176,2 +2179,5 @@
+       Symbol *sym = category[cat][i];
++      if (cat == Symbol::function_parameter && sym->isHiddenReturn() &&
++	  fd != (Funcdata *)0 && fd->getFuncProto().isOutputLocked())
++	continue;
+       if (sym->isTypeLocked()) { // Only hold if TYPE locked
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -41,7 +41,7 @@
+     }
+   }
+-  SegmentedEnvironment(bool buildFlow = false) : hasFlow(buildFlow) {
++  SegmentedEnvironment(bool buildFlow = false,const string &language = "x86:LE:16:Protected Mode:default",const string &bytes = "cb",bool high = true) : hasFlow(buildFlow) {
+     initialize();
+-    istringstream s("<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">cb</bytechunk></binaryimage>");
++    istringstream s("<binaryimage arch=\"" + language + "\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">" + bytes + "</bytechunk></binaryimage>");
+     DocumentStorage store;
+     Document *doc = store.parseDocument(s);
+@@ -50,5 +50,6 @@
+     arch->init(store);
+     fd = arch->symboltab->getGlobalScope()->addFunction(Address(arch->getDefaultCodeSpace(),0x1000),"segmented_test")->getFunction();
+-    fd->setHighLevel();
++    if (high)
++      fd->setHighLevel();
+     if (hasFlow) {
+       fd->startProcessing();
+@@ -106,4 +107,115 @@
+   }
+ };
++
++static ParameterPieces installHiddenReturn(SegmentedEnvironment &env,bool fixed,bool sourceInput = false) {
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(8,TYPE_UINT);
++  TypeStruct *big = factory->getTypeStruct("Big");
++  factory->setFields({TypeField(0,0,"words",factory->getTypeArray(3,word))},{},big,24,8,0);
++  PrototypePieces signature;
++  signature.model = env.arch->defaultfp;
++  signature.outtype = big;
++  signature.firstVarArgSlot = -1;
++  if (sourceInput) {
++    signature.intypes.push_back(word);
++    signature.innames.push_back("value");
++  }
++  vector<ParameterPieces> pieces;
++  signature.model->assignParameterStorage(signature,pieces,false);
++  ASSERT_EQUALS(pieces.size(),sourceInput ? 3 : 2);
++  ASSERT((pieces[0].flags & ParameterPieces::indirectstorage) != 0);
++  ASSERT((pieces[1].flags & ParameterPieces::hiddenretparm) != 0);
++  ASSERT((pieces[1].flags & ParameterPieces::typelock) == 0);
++  ASSERT_EQUALS(pieces[1].addr,env.arch->translate->getRegister("RDI").getAddr());
++  ASSERT_EQUALS(pieces[1].type->getMetatype(),TYPE_PTR);
++  ASSERT_EQUALS(((TypePointer *)pieces[1].type)->getPtrTo(),big);
++  FuncProto &prototype = env.fd->getFuncProto();
++  if (fixed)
++    prototype.setPieces(signature);
++  else {
++    prototype.setModel(signature.model);
++    prototype.setOutput(pieces[0]);
++    prototype.setOutputLock(true);
++    prototype.setParam(0,"rethidden",pieces[1]);
++  }
++  ASSERT_EQUALS(prototype.isInputLocked(),fixed);
++  return pieces[1];
++}
++
++static void assertHiddenReturn(SegmentedEnvironment &env,const ParameterPieces &expected,bool fixed) {
++  FuncProto &prototype = env.fd->getFuncProto();
++  ASSERT(prototype.isOutputLocked());
++  ASSERT_EQUALS(prototype.isInputLocked(),fixed);
++  ASSERT(!prototype.isDotdotdot());
++  ASSERT(prototype.numParams() >= 1);
++  ProtoParameter *hidden = prototype.getParam(0);
++  ASSERT(hidden->isHiddenReturn());
++  ASSERT_EQUALS(hidden->getType(),expected.type);
++  ASSERT_EQUALS(hidden->getAddress(),expected.addr);
++  ASSERT_EQUALS(hidden->isTypeLocked(),fixed);
++  Varnode *input = env.fd->findVarnodeInput(expected.type->getSize(),expected.addr);
++  ASSERT(input != (Varnode *)0);
++  ASSERT(input->isLockedInput());
++  ASSERT_EQUALS(input->getType(),expected.type);
++}
++
++static void checkHiddenReturnRecovery(const string &bytes,bool fixed,bool sourceInput) {
++  SegmentedEnvironment env(false,"x86:LE:64:default:gcc",bytes);
++  ParameterPieces hidden = installHiddenReturn(env,fixed,fixed && sourceInput);
++  env.arch->allacts.getCurrent()->reset(*env.fd);
++  ASSERT(env.arch->allacts.getCurrent()->perform(*env.fd) >= 0);
++  assertHiddenReturn(env,hidden,fixed);
++  FuncProto &prototype = env.fd->getFuncProto();
++  ASSERT_EQUALS(prototype.numParams(),sourceInput ? 2 : 1);
++  if (sourceInput) {
++    ProtoParameter *source = prototype.getParam(1);
++    ASSERT(!source->isHiddenReturn());
++    ASSERT_EQUALS(source->getAddress(),env.arch->translate->getRegister("RSI").getAddr());
++    ASSERT_EQUALS(source->getSize(),8);
++    ASSERT_EQUALS(source->isTypeLocked(),fixed);
++    if (fixed)
++      ASSERT_EQUALS(source->getName(),"value");
++  }
++}
++
++TEST(open_hidden_return_recovery) {
++  checkHiddenReturnRecovery("48c7070100000048c747080200000048c74710030000004889f8c3",false,false);
++  checkHiddenReturnRecovery("c3",false,false);
++  checkHiddenReturnRecovery("4889374889f8c3",false,true);
++}
++
++TEST(fixed_hidden_return_recovery) {
++  checkHiddenReturnRecovery("c3",true,false);
++  checkHiddenReturnRecovery("4889374889f8c3",true,true);
++}
++
++TEST(open_hidden_return_without_type_recovery) {
++  SegmentedEnvironment env(true,"x86:LE:64:default:gcc","c3",false);
++  ParameterPieces hidden = installHiddenReturn(env,false);
++  FuncProto &prototype = env.fd->getFuncProto();
++  ParameterPieces hint;
++  hint.addr = env.arch->translate->getRegister("RSI").getAddr();
++  hint.type = env.arch->types->getBase(8,TYPE_UINT);
++  hint.flags = 0;
++  prototype.setParam(1,"old_hint",hint);
++  prototype.clearUnlockedInput();
++  ASSERT_EQUALS(prototype.numParams(),1);
++  ASSERT(prototype.getParam(0)->isHiddenReturn());
++  Varnode *source = env.fd->newVarnode(8,hint.addr);
++  source = env.fd->setInputVarnode(source);
++  env.op(CPUI_COPY,{source},env.arch->types->getBase(8,TYPE_UNKNOWN));
++  ActionPrototypeTypes force("hidden-return-test");
++  ASSERT_EQUALS(force.apply(*env.fd),0);
++  ActionInputPrototype recover("hidden-return-test");
++  ASSERT_EQUALS(recover.apply(*env.fd),0);
++  ASSERT(!env.fd->isHighOn());
++  assertHiddenReturn(env,hidden,false);
++  ASSERT_EQUALS(prototype.numParams(),2);
++  ASSERT_EQUALS(prototype.getParam(1)->getAddress(),hint.addr);
++  ASSERT_EQUALS(prototype.getParam(1)->getType()->getMetatype(),TYPE_UNKNOWN);
++  prototype.setOutputLock(false);
++  prototype.clearUnlockedInput();
++  ASSERT_EQUALS(prototype.numParams(),0);
++}
+
+ TEST(target_fundamental_sizes) {
