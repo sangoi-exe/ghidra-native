@@ -4,10 +4,17 @@ Focused regression tests for the decompiler patches in `patches/`.
 The tests build the vendored decompiler sources with meson and run the
 tests from `src/unittests/` with the small driver in `tests/main.cc`.
 
-The tests in `src/unittests/` are picked up by the upstream
-`src/decompiler/Makefile` as well (its `UNITTEST_SOURCE` macro looks in
-`../unittests`), so `make -C src/decompiler test` builds the same tests
-on systems with a full GNU toolchain and BFD.
+The tests in `src/unittests/` are picked up by the imported `src/decompiler/Makefile` as well (its `UNITTEST_SOURCE` macro looks in `../unittests`). This alternate build requires the full GNU toolchain and BFD development files; it is distinct from the root `make test`, which uses Meson. Prepare the sources before calling the imported Makefile, which does not invoke the shared runner itself:
+
+```
+python3 scripts/apply_patches.py
+make -C src/decompiler test
+python3 scripts/apply_patches.py
+```
+
+The current imported test target has an object-name collision: `src/decompiler/pcodeinject.cc` and `src/unittests/pcodeinject.cc` both map to `test_dbg/pcodeinject.o`, which appears twice in the link command and causes duplicate definitions. Preparation reuse after its object/dependency generation is supported, but output classification does not fix this link failure or establish a complete alternate test run. Use the Meson suite for native regression execution.
+
+Use matching compiled language files through `SLEIGHHOME` for the native language-dependent tests. Preparation reuse accepts the imported test target's `src/decompiler/test_dbg/*.o` files only when paired with `.cc` inputs in `src/decompiler/` or `src/unittests/`, plus `test_dbg/depend`, its `test_dbg/depend.<numeric PID>` temporary and `src/decompiler/decomp_test_dbg`. Other files in `test_dbg/` are still inputs, not blanket-ignored outputs. The imported Makefile can regenerate parser `.cc`/`.hh` files from `.y`/`.l` inputs; changed parser bytes remain a preparation mismatch, even if generated during a build. Preserve that tree and use new matching prepared sources rather than deleting `patch.done`. Support for these test outputs does not qualify other optional imported targets.
 
 ## Running
 
@@ -40,7 +47,7 @@ If the system has no zlib development package, meson falls back to the
 
 Preparation and build reuse validate `patch.done` against the current canonical patches and source inputs. A stale, malformed or old empty marker, or a markerless dirty/partly prepared source tree, refuses without changing source bytes. Preserve changes and start with a new checkout or matching prepared distribution; do not remove the marker and retry on the same tree. Matching prepared distributions do not require Git to build, but fresh-preparation tests require a Git checkout and executable.
 
-Meson registers `ghidra-native-unittests` and `patch-preparation`. The former compiles its matching x86 language fixture and runs the native driver; the latter currently contains eight controls exercising the real patch runner and stack. They check fresh/matching reuse, Git-free prepared reuse, preserved source bytes on changed patches/source or invalid preparation, reuse with a paired flat native object output, and reuse after compiling x86 languages with the built Sleigh compiler. Edits to native `.cc`/`.hh` sources and processor includes remain refusal cases; only flat `src/decompiler/*.o` outputs paired with adjacent `.cc` files and processor `.sla` outputs paired with `.slaspec` files are excluded from source identity. Set `TMPDIR` to a task-scoped cache directory when running the preparation tests; their disposable source copies are created there. Running `python3 tests/test_apply_patches.py` directly without `SLEIGHC` skips the compiler case; the registered Meson test supplies it.
+Meson registers `ghidra-native-unittests` and `patch-preparation`. The former compiles its matching x86 language fixture and runs the native driver; the latter exercises the real patch runner and stack. Its controls check fresh/matching reuse, Git-free prepared reuse with flat and imported test outputs, unchanged source/marker/stamp bytes on refusal, recognized output shapes, and reuse after compiling x86 languages with the built Sleigh compiler. Native sources, headers, grammar inputs and generated parsers, processor specifications/includes and unrelated non-output files remain refusal cases. Only the recognized outputs described above, paired flat native objects and paired processor `.sla` outputs are excluded from source identity. Set `TMPDIR` to a task-scoped cache directory when running the preparation tests; their disposable source copies are created there. Running `python3 tests/test_apply_patches.py` directly without `SLEIGHC` skips the compiler case; the registered Meson test supplies it.
 
 Native owner tests do not qualify every bridge consumer. Bridge Make, XPS Make/Meson and the packaged-distribution Make path need their own preparation/reuse observations; source wiring or a passing native suite alone does not establish full host linkage or runtime readiness.
 
