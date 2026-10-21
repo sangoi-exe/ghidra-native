@@ -1,0 +1,165 @@
+diff --git a/src/decompiler/type.cc b/src/decompiler/type.cc
+--- a/src/decompiler/type.cc
++++ b/src/decompiler/type.cc
+@@ -4979,19 +4979,26 @@
+   }
+   if (forcecore)
+     tc.flags |= Datatype::coretype;
+-  Datatype *ct = findByIdLocal(tc.name,tc.id);
+-  if (ct == (Datatype *)0) {
+-    ct = findAdd(tc);	// Create stub to allow recursive definitions
+-  }
+-  else if (ct->getMetatype() != TYPE_CODE)
+-    throw LowlevelError("Trying to redefine type: " + tc.name);
+-  tc.decodePrototype(decoder, isConstructor, isDestructor, *this);
+-  if (!ct->isIncomplete()) {	// Code data-type of this name was already present
+-    if (0 != ct->compareDependency(tc))
+-      throw LowlevelError("Redefinition of code data-type: " + tc.name);
+-  }
+-  else {	// If there was a placeholder stub
+-    setPrototype(tc.proto, (TypeCode *)ct, tc.flags);
++  Datatype *ct;
++  if (tc.name.empty() && tc.id == 0) {
++    tc.decodePrototype(decoder, isConstructor, isDestructor, *this);
++    ct = findAdd(tc);
++  }
++  else {
++    ct = findByIdLocal(tc.name,tc.id);
++    if (ct == (Datatype *)0) {
++      ct = findAdd(tc);	// Create stub to allow recursive definitions
++    }
++    else if (ct->getMetatype() != TYPE_CODE)
++      throw LowlevelError("Trying to redefine type: " + tc.name);
++    tc.decodePrototype(decoder, isConstructor, isDestructor, *this);
++    if (!ct->isIncomplete()) {	// Code data-type of this name was already present
++      if (0 != ct->compareDependency(tc))
++	throw LowlevelError("Redefinition of code data-type: " + tc.name);
++    }
++    else {	// If there was a placeholder stub
++      setPrototype(tc.proto, (TypeCode *)ct, tc.flags);
++    }
+   }
+   resolveIncompleteTypedefs();
+ //  decoder.closeElement(elemId);
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -22,6 +22,7 @@
+ #include "printjava.hh"
+ #include "ruleaction.hh"
+ #include "test.hh"
++#include <algorithm>
+
+ namespace ghidra {
+
+@@ -647,6 +648,110 @@
+     assertInternalParameterRoundTrip(expected->getParam(i),actual->getParam(i));
+   ASSERT(output.str().find("<returnsym") != string::npos);
+   ASSERT(output.str().find("<retparam") == string::npos);
++}
++
++template<typename Encode,typename Decode> static void assertAnonymousCodeInterning(void) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  PrototypePieces signature;
++  signature.model = env.arch->getModel("__cdecl16near");
++  signature.outtype = factory->getBase(2,TYPE_INT);
++  signature.firstVarArgSlot = -1;
++  TypeCode *fixed = factory->getTypeCode(signature);
++  signature.firstVarArgSlot = 0;
++  TypeCode *unspecified = factory->getTypeCode(signature);
++  ASSERT(fixed != unspecified);
++  signature.firstVarArgSlot = -1;
++  signature.intypes.push_back(factory->getTypePointer(2,factory->getBase(2,TYPE_UINT),1));
++  signature.innames.push_back("value");
++  TypeCode *parameterized = factory->getTypeCode(signature);
++  Datatype *cases[] = {parameterized,factory->getTypePointer(2,parameterized,1),factory->getTypePointer(4,parameterized,1),fixed,unspecified};
++  for(Datatype *original : cases) {
++    ostringstream output;
++    Encode encoder(output);
++    original->encodeRef(encoder);
++    Datatype *decoded[2];
++    for(int4 i=0;i<2;++i) {
++      istringstream input(output.str());
++      Decode decoder(env.arch);
++      decoder.ingestStream(input);
++      decoded[i] = factory->decodeType(decoder);
++    }
++    vector<Datatype *> owned;
++    factory->dependentOrder(owned);
++    ASSERT_EQUALS(std::count(owned.begin(),owned.end(),decoded[0]),1);
++    ASSERT_EQUALS(std::count(owned.begin(),owned.end(),decoded[1]),1);
++    ASSERT_EQUALS(decoded[0],decoded[1]);
++    ASSERT_EQUALS(decoded[0],original);
++    Datatype *code = decoded[0];
++    if (code->getMetatype() == TYPE_PTR)
++      code = ((TypePointer *)code)->getPtrTo();
++    ASSERT_EQUALS(code->getMetatype(),TYPE_CODE);
++    ASSERT_EQUALS(code->isIncomplete(),false);
++    const FuncProto *prototype = ((TypeCode *)code)->getPrototype();
++    ASSERT_EQUALS(prototype->getOutputType(),signature.outtype);
++    ASSERT_EQUALS(prototype->numParams(),code == fixed || code == unspecified ? 0 : 1);
++    ASSERT_EQUALS(prototype->isDotdotdot(),code == unspecified);
++    if (prototype->numParams() == 1) {
++      ASSERT_EQUALS(prototype->getParam(0)->getType(),signature.intypes[0]);
++      ASSERT_EQUALS(prototype->getParam(0)->getName(),"value");
++    }
++  }
++}
++
++TEST(anonymous_code_xml_canonical_identity) {
++  assertAnonymousCodeInterning<XmlEncode,XmlDecode>();
++}
++
++TEST(anonymous_code_packed_canonical_identity) {
++  assertAnonymousCodeInterning<PackedEncode,PackedDecode>();
++}
++
++template<typename Encode,typename Decode> static void assertNamedCodeReferences(void) {
++  SegmentedEnvironment original;
++  TypeFactory *factory = original.arch->types;
++  PrototypePieces signature;
++  signature.model = original.arch->getModel("__cdecl16near");
++  signature.outtype = factory->getBase(2,TYPE_INT);
++  signature.intypes.push_back(factory->getBase(2,TYPE_UINT));
++  signature.innames.push_back("value");
++  signature.firstVarArgSlot = -1;
++  Datatype *named = factory->setName(factory->getTypeCode(signature),"NamedCallback");
++  Datatype *alias = factory->getTypedef(factory->getTypePointer(2,named,1),"CallbackAlias",0,0);
++  ostringstream output;
++  Encode encoder(output);
++  encoder.openElement(ELEM_TYPEGRP);
++  named->encode(encoder);
++  named->encode(encoder);
++  alias->encode(encoder);
++  named->encodeRef(encoder);
++  alias->encodeRef(encoder);
++  encoder.closeElement(ELEM_TYPEGRP);
++
++  SegmentedEnvironment restored;
++  TypeFactory *restoredFactory = restored.arch->types;
++  istringstream input(output.str());
++  Decode decoder(restored.arch);
++  decoder.ingestStream(input);
++  uint4 element = decoder.openElement(ELEM_TYPEGRP);
++  Datatype *actual = restoredFactory->decodeType(decoder);
++  ASSERT_EQUALS(actual->getName(),named->getName());
++  ASSERT_EQUALS(actual->getId(),named->getId());
++  ASSERT_EQUALS(actual->isIncomplete(),false);
++  ASSERT_EQUALS(restoredFactory->decodeType(decoder),actual);
++  Datatype *actualAlias = restoredFactory->decodeType(decoder);
++  ASSERT_EQUALS(actualAlias->getName(),alias->getName());
++  ASSERT_EQUALS(actualAlias->getTypedef()->getMetatype(),TYPE_PTR);
++  ASSERT_EQUALS(((TypePointer *)actualAlias->getTypedef())->getPtrTo(),actual);
++  ASSERT_EQUALS(actualAlias->isIncomplete(),false);
++  ASSERT_EQUALS(restoredFactory->decodeType(decoder),actual);
++  ASSERT_EQUALS(restoredFactory->decodeType(decoder),actualAlias);
++  decoder.closeElement(element);
++}
++
++TEST(named_code_reference_roundtrip) {
++  assertNamedCodeReferences<XmlEncode,XmlDecode>();
++  assertNamedCodeReferences<PackedEncode,PackedDecode>();
+ }
+
+ TEST(internal_prototype_roundtrip) {
