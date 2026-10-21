@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 
 
@@ -18,6 +19,7 @@ def fingerprint(root, paths):
 def source_files(root):
     processors = root / 'src/Processors'
     decompiler = root / 'src/decompiler'
+    unittests = root / 'src/unittests'
     for path in (root / 'src').rglob('*'):
         if not path.is_file():
             continue
@@ -25,6 +27,13 @@ def source_files(root):
             continue
         if path.suffix == '.o' and path.parent == decompiler and path.with_suffix('.cc').is_file():
             continue
+        if path.parent == decompiler and path.name == 'decomp_test_dbg':
+            continue
+        if path.parent == decompiler / 'test_dbg':
+            if path.name == 'depend' or re.fullmatch(r'depend\.[0-9]+', path.name):
+                continue
+            if path.suffix == '.o' and any((directory / path.with_suffix('.cc').name).is_file() for directory in (decompiler, unittests)):
+                continue
         yield path
 
 

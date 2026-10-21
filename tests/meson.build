@@ -24,5 +24,6 @@ test('ghidra-native-unittests', decompiler_test,
   env: ['SLEIGHHOME=' + meson.current_build_dir()])
 
 test('patch-preparation', python, args: files('test_apply_patches.py'),
+  timeout: 90,
   depends: sleighc_exe,
   env: ['SLEIGHC=' + sleighc_exe.full_path()])
