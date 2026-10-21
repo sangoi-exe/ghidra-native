@@ -1,0 +1,101 @@
+diff --git a/src/decompiler/ruleaction.cc b/src/decompiler/ruleaction.cc
+--- a/src/decompiler/ruleaction.cc
++++ b/src/decompiler/ruleaction.cc
+@@ -6518,11 +6518,12 @@
+   // Create PTRADD portion of operation
+   if (multNode != (Varnode *)0) {
+     newop = data.newOpBefore(baseOp,CPUI_PTRADD,ptr,multNode,data.newConstant(ptrsize,size));
+-    if (ptr->getType()->needsResolution()) {
+-      if (((TypePointer *)ptr->getType())->getPtrTo()->getSize() == baseType->getSize())
+-	data.forceFacingType(ptr->getType(),-1,newop, 0);		// Force type not to resolve before the index is applied
++    Datatype *ptrType = ptr->getType();
++    if (ptrType->needsResolution()) {
++      if (ptrType->getMetatype() == TYPE_PTR && ((TypePointer *)ptrType)->getPtrTo()->getSize() == baseType->getSize())
++	data.forceFacingType(ptrType,-1,newop, 0);		// Force type not to resolve before the index is applied
+       else
+-	data.inheritUnionField(ptr->getType(), newop, 0, baseOp, baseSlot);
++	data.inheritUnionField(ptrType, newop, 0, baseOp, baseSlot);
+     }
+     if (data.isTypeRecoveryExceeded())
+       assignPropagatedType(newop);
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -676,6 +676,77 @@
+   function = factory->getTypeCode(signature);
+   assertInternalPrototypeRoundTrip(function);
+   assertInternalPrototypeRoundTrip(factory->getTypePointer(2,function,1));
++}
++
++static PcodeOp *rewriteUnionPointerArithmetic(SegmentedEnvironment &env,Datatype *unresolved,TypePointer *facing,int4 field,uintb displacement,TypePointer *resultType) {
++  Varnode *pointer = env.op(CPUI_COPY,{env.constant(8,0x2000)},unresolved)->getOut();
++  PcodeOp *add = env.op(CPUI_INT_ADD,{pointer,env.constant(8,displacement)},resultType);
++  Varnode *result = add->getOut();
++  env.fd->forceFacingType(unresolved,field,add,0);
++  ASSERT_EQUALS(pointer->getType(),unresolved);
++  ASSERT_EQUALS(pointer->getTypeReadFacing(add),facing);
++  env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(env.arch->getDefaultDataSpace()),result},env.arch->types->getBase(resultType->getPtrTo()->getSize(),TYPE_UINT));
++  env.fd->startTypeRecovery();
++  RulePtrArith rule("union-pointer-test");
++  ASSERT_EQUALS(rule.applyOp(add,*env.fd),1);
++  return result->getDef();
++}
++
++static void assertUnionPointerRead(Funcdata *fd,Datatype *unresolved,PcodeOp *op,int4 field,Datatype *facing) {
++  const ResolvedUnion *resolution = fd->getUnionField(unresolved,op,0);
++  ASSERT(resolution != (const ResolvedUnion *)0);
++  ASSERT_EQUALS(resolution->getFieldNum(),field);
++  ASSERT_EQUALS(resolution->getDatatype(),facing);
++  ASSERT_EQUALS(op->getIn(0)->getType(),unresolved);
++  ASSERT_EQUALS(op->getIn(0)->getTypeReadFacing(op),facing);
++}
++
++TEST(union_pointer_field_array_arithmetic) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  TypeUnion *a = factory->getTypeUnion("RecursivePointerA");
++  TypeUnion *b = factory->getTypeUnion("RecursivePointerB");
++  TypePointer *pointer = factory->getTypePointer(8,b,1);
++  Datatype *word = factory->getBase(8,TYPE_UINT);
++  factory->setFields({TypeField(0,0,"p",pointer)},a,8,8,0);
++  factory->setFields({TypeField(0,0,"a",a),TypeField(1,0,"value",word)},b,8,8,0);
++  PcodeOp *rewritten = rewriteUnionPointerArithmetic(env,a,pointer,0,8,pointer);
++  ASSERT_EQUALS(rewritten->code(),CPUI_PTRADD);
++  ASSERT_EQUALS(rewritten->getIn(1)->getOffset(),1);
++  ASSERT_EQUALS(rewritten->getIn(2)->getOffset(),8);
++  assertUnionPointerRead(env.fd,a,rewritten,0,pointer);
++}
++
++TEST(union_pointer_field_member_arithmetic) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(4,TYPE_UINT);
++  TypeStruct *record = factory->getTypeStruct("PointerRecord");
++  factory->setFields({TypeField(0,0,"first",word),TypeField(4,4,"second",word)},{},record,8,4,0);
++  TypePointer *pointer = factory->getTypePointer(8,record,1);
++  TypeUnion *carrier = factory->getTypeUnion("PointerCarrier");
++  factory->setFields({TypeField(0,0,"bits",factory->getBase(8,TYPE_UINT)),TypeField(1,0,"p",pointer)},carrier,8,8,0);
++  PcodeOp *rewritten = rewriteUnionPointerArithmetic(env,carrier,pointer,1,4,factory->getTypePointer(8,word,1));
++  ASSERT_EQUALS(rewritten->code(),CPUI_PTRSUB);
++  ASSERT_EQUALS(rewritten->getIn(1)->getOffset(),4);
++  assertUnionPointerRead(env.fd,carrier,rewritten,1,pointer);
++}
++
++TEST(pointer_to_union_array_arithmetic) {
++  for(int4 fieldSize=4;fieldSize<=8;fieldSize*=2) {
++    SegmentedEnvironment env;
++    TypeFactory *factory = env.arch->types;
++    Datatype *fieldType = factory->getBase(fieldSize,TYPE_UINT);
++    TypeUnion *record = factory->getTypeUnion("IndexedUnion");
++    factory->setFields({TypeField(0,0,"whole",factory->getBase(8,TYPE_UINT)),TypeField(1,0,"value",fieldType)},record,8,8,0);
++    TypePointer *pointer = factory->getTypePointer(8,record,1);
++    TypePointer *facing = factory->getTypePointer(8,fieldType,1);
++    PcodeOp *rewritten = rewriteUnionPointerArithmetic(env,pointer,facing,1,8,facing);
++    ASSERT_EQUALS(rewritten->code(),CPUI_PTRADD);
++    ASSERT_EQUALS(rewritten->getIn(1)->getOffset(),8/fieldSize);
++    ASSERT_EQUALS(rewritten->getIn(2)->getOffset(),fieldSize);
++    assertUnionPointerRead(env.fd,pointer,rewritten,fieldSize == 8 ? -1 : 1,fieldSize == 8 ? pointer : facing);
++  }
+ }
+
+ TEST(segmented_spacebase) {
