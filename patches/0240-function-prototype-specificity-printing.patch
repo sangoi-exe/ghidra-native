@@ -1,0 +1,75 @@
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -2276,3 +2276,3 @@
+-  if (sz == 0)
++  if (sz == 0 && !proto->isDotdotdot())
+     emit->print(KEYWORD_VOID,EmitMarkup::keyword_color);
+   else {
+@@ -2298,6 +2298,5 @@
+   }
+-  if (proto->isDotdotdot()) {
+-    if (sz != 0)
+-      emit->print(COMMA);
++  if (proto->isDotdotdot() && sz != 0) {
++    emit->print(COMMA);
+     emit->print(DOTDOTDOT);
+   }
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -441,6 +441,54 @@
+   for(const Element *child : element->getChildren())
+     text += functionDeclarationText(child);
+   return text;
++}
++
++TEST(function_empty_prototype_printing) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  PrototypePieces signature;
++  signature.model = env.arch->defaultfp;
++  signature.outtype = factory->getBase(2,TYPE_UINT,"word");
++  signature.firstVarArgSlot = -1;
++  FuncProto &prototype = env.fd->getFuncProto();
++  prototype.setPieces(signature);
++  FunctionDeclarationPrinter<PrintC> actual(env.arch);
++  actual.setConvention(false);
++  PointerDeclarationPrinter<PrintC> callback(env.arch);
++  ASSERT_EQUALS(actual.declaration(env.fd),"word segmented_test(void)");
++  ASSERT_EQUALS(callback.declaration(factory->getTypePointer(2,factory->getTypeCode(signature),1)),"word (*value)(void)");
++
++  signature.firstVarArgSlot = 0;
++  prototype.setPieces(signature);
++  ASSERT_EQUALS(prototype.numParams(),0);
++  ASSERT(prototype.isDotdotdot());
++  ASSERT_EQUALS(callback.declaration(factory->getTypePointer(2,factory->getTypeCode(signature),1)),"word (*value)()");
++  ASSERT_EQUALS(actual.declaration(env.fd),"word segmented_test()");
++}
++
++TEST(function_named_variadic_printing) {
++  SegmentedEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  PrototypePieces signature;
++  signature.model = env.arch->defaultfp;
++  signature.outtype = factory->getBase(2,TYPE_UINT,"word");
++  signature.intypes = {signature.outtype,signature.outtype};
++  signature.innames = {"left","right"};
++  signature.firstVarArgSlot = -1;
++  FuncProto &prototype = env.fd->getFuncProto();
++  prototype.setPieces(signature);
++  FunctionDeclarationPrinter<PrintC> actual(env.arch);
++  actual.setConvention(false);
++  PointerDeclarationPrinter<PrintC> callback(env.arch);
++  ASSERT_EQUALS(actual.declaration(env.fd),"word segmented_test(word left, word right)");
++  ASSERT_EQUALS(callback.declaration(factory->getTypePointer(2,factory->getTypeCode(signature),1)),"word (*value)(word, word)");
++
++  signature.firstVarArgSlot = 2;
++  prototype.setPieces(signature);
++  ASSERT_EQUALS(prototype.numParams(),2);
++  ASSERT(prototype.isDotdotdot());
++  ASSERT_EQUALS(actual.declaration(env.fd),"word segmented_test(word left, word right, ...)");
++  ASSERT_EQUALS(callback.declaration(factory->getTypePointer(2,factory->getTypeCode(signature),1)),"word (*value)(word, word, ...)");
+ }
+
+ TEST(contextual_function_declaration) {
