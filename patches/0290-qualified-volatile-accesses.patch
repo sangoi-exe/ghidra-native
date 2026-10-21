@@ -1,0 +1,672 @@
+diff --git a/src/decompiler/coreaction.cc b/src/decompiler/coreaction.cc
+index 626e5ba..8d75fdf 100644
+--- a/src/decompiler/coreaction.cc
++++ b/src/decompiler/coreaction.cc
+@@ -1346,6 +1346,63 @@ void ActionVarnodeProps::handleExtendedZero(Varnode *vn,Funcdata &data)
+   }
+ }
+ 
++bool ActionVolatile::hasVolatileComponent(Datatype *type)
++
++{
++  vector<Datatype *> worklist(1,type);
++  set<Datatype *> visited;
++  while(!worklist.empty()) {
++    Datatype *current = worklist.back();
++    worklist.pop_back();
++    if (!visited.insert(current).second || current->getMetatype() == TYPE_CODE) continue;
++    if (current->isVolatile()) return true;
++    for(int4 i=0;i<current->numDepend();++i)
++      worklist.push_back(current->getDepend(i));
++  }
++  return false;
++}
++
++int4 ActionVolatile::apply(Funcdata &data)
++
++{
++  vector<Varnode *> worklist;
++  for(VarnodeLocSet::const_iterator iter=data.beginLoc();iter!=data.endLoc();++iter) {
++    Varnode *vn = *iter;
++    if (!vn->isAnnotation() && !vn->isFree() && vn->getType()->getMetatype() == TYPE_PTR &&
++        hasVolatileComponent(((TypePointer *)vn->getType())->getPtrTo()))
++      worklist.push_back(vn);
++  }
++  // Follow established pointer types using the same opcode semantics as later type recovery.
++  while(!worklist.empty()) {
++    Varnode *vn = worklist.back();
++    worklist.pop_back();
++    for(list<PcodeOp *>::const_iterator iter=vn->beginDescend();iter!=vn->endDescend();++iter) {
++      PcodeOp *op = *iter;
++      Varnode *out = op->getOut();
++      if (out == (Varnode *)0 || out->isTypeLock()) continue;
++      Datatype *type;
++      if (op->code() == CPUI_INT_ADD || op->code() == CPUI_PTRADD || op->code() == CPUI_PTRSUB)
++        type = TypeOpIntAdd::propagateAddIn2Out(vn->getType(),data.getArch()->types,op,op->getSlot(vn),false);
++      else
++        type = op->getOpcode()->propagateType(vn->getType(),op,vn,out,op->getSlot(vn),-1);
++      if (type == (Datatype *)0 || type->getMetatype() != TYPE_PTR || type->getSize() != out->getSize()) continue;
++      if (type->typeOrder(*out->getType()) < 0 && out->updateType(type))
++        worklist.push_back(out);
++    }
++  }
++  for(PcodeOpTree::const_iterator iter=data.beginOpAll();iter!=data.endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || (op->code() != CPUI_LOAD && op->code() != CPUI_STORE)) continue;
++    int4 size = op->code() == CPUI_LOAD ? op->getOut()->getSize() : op->getIn(2)->getSize();
++    Datatype *type = TypeOp::propagateFromPointer(data.getArch()->types,op->getIn(1)->getType(),size);
++    if (type != (Datatype *)0 && type->isVolatile()) {
++      data.replaceVolatile(op);
++      count += 1;
++    }
++  }
++  return 0;
++}
++
+ int4 ActionVarnodeProps::apply(Funcdata &data)
+ 
+ {
+@@ -5717,6 +5774,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+       actmainloop->addAction( new ActionUnreachable("base") );
+       actmainloop->addAction( new ActionVarnodeProps("base") );
+       actmainloop->addAction( new ActionHeritage("base") );
++      actmainloop->addAction( new ActionVolatile("base") );
+       actmainloop->addAction( new ActionParamDouble("protorecovery") );
+       actmainloop->addAction( new ActionSegmentize("base"));
+       actmainloop->addAction( new ActionInternalStorage("base") );
+diff --git a/src/decompiler/coreaction.hh b/src/decompiler/coreaction.hh
+index a676275..f581f96 100644
+--- a/src/decompiler/coreaction.hh
++++ b/src/decompiler/coreaction.hh
+@@ -230,6 +230,18 @@ public:
+   virtual int4 apply(Funcdata &data);
+ };
+ 
++/// Establish qualified indirect access effects after heritage and before dead-code removal.
++class ActionVolatile : public Action {
++  static bool hasVolatileComponent(Datatype *type);
++public:
++  ActionVolatile(const string &g) : Action(0,"volatile",g) {}
++  virtual Action *clone(const ActionGroupList &grouplist) const {
++    if (!grouplist.contains(getGroup())) return (Action *)0;
++    return new ActionVolatile(getGroup());
++  }
++  virtual int4 apply(Funcdata &data);
++};
++
+ /// \brief Mark Varnodes built out of \e legal parameters
+ ///
+ /// Label a varnode with the \b directwrite attribute if:
+diff --git a/src/decompiler/funcdata.hh b/src/decompiler/funcdata.hh
+index a9cfba6..4de4204 100644
+--- a/src/decompiler/funcdata.hh
++++ b/src/decompiler/funcdata.hh
+@@ -413,6 +413,7 @@ public:
+   void transferVarnodeProperties(Varnode *vn,Varnode *newVn,int4 lsbOffset);
+   bool fillinReadOnly(Varnode *vn);		///< Replace the given Varnode with its (constant) value in the load image
+   bool replaceVolatile(Varnode *vn);		///< Replace accesses of the given Varnode with \e volatile operations
++  void replaceVolatile(PcodeOp *op); ///< Replace a qualified indirect LOAD or STORE with a volatile operation
+   void markIndirectOnly(void);			///< Mark \e illegal \e input Varnodes used only in INDIRECTs
+   void totalReplace(Varnode *vn,Varnode *newvn);
+   void totalReplaceConstant(Varnode *vn,uintb val);
+diff --git a/src/decompiler/funcdata_varnode.cc b/src/decompiler/funcdata_varnode.cc
+index b2c20ab..b043ac7 100644
+--- a/src/decompiler/funcdata_varnode.cc
++++ b/src/decompiler/funcdata_varnode.cc
+@@ -740,6 +740,25 @@ bool Funcdata::fillinReadOnly(Varnode *vn)
+   return changemade;
+ }
+ 
++/// Preserve an indirect memory access using the existing volatile userop and a pointer operand.
++void Funcdata::replaceVolatile(PcodeOp *op)
++
++{
++  bool read = op->code() == CPUI_LOAD;
++  UserPcodeOp *userop = glb->userops.registerBuiltin(read ? UserPcodeOp::BUILTIN_VOLATILE_READ : UserPcodeOp::BUILTIN_VOLATILE_WRITE);
++  vector<Varnode *> inputs;
++  inputs.push_back(newConstant(4,userop->getIndex()));
++  inputs.push_back(op->getIn(1));
++  if (!read)
++    inputs.push_back(op->getIn(2));
++  inputs.push_back(newConstant(4,op->getIn(0)->getSpaceFromConst()->getIndex())); // Serialize the space index, not an AddrSpace pointer.
++  opSetAllInput(op,inputs);
++  opSetOpcode(op,CPUI_CALLOTHER);
++  op->setAdditionalFlag(PcodeOp::special_prop);
++  if (read)
++    op->setHoldOutput();
++}
++
+ /// The Varnode is assumed not fully linked.  The read or write action is
+ /// modeled by inserting a special \e user op that represents the action. The given Varnode is
+ /// replaced by a temporary Varnode within the data-flow, and the original address becomes
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+index c163ae1..24b8c41 100644
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -722,6 +722,14 @@ void PrintC::opCallother(const PcodeOp *op)
+ 
+ {
+   UserPcodeOp *userop = glb->userops.getOp(op->getIn(0)->getOffset());
++  if ((userop->getType() == UserPcodeOp::volatile_read || userop->getType() == UserPcodeOp::volatile_write) && !op->getIn(1)->isAnnotation()) {
++    // Qualified indirect accesses are C lvalues, independent of fixed-address functional display settings.
++    if (userop->getType() == UserPcodeOp::volatile_read)
++      opLoad(op);
++    else
++      opStore(op);
++    return;
++  }
+   uint4 display = userop->getDisplay();
+   if (display == 0) {	// Emit using functional syntax
+     string nm = op->getOpcode()->getOperatorName(op);
+diff --git a/src/decompiler/typeop.cc b/src/decompiler/typeop.cc
+index c688db2..c9f5d97 100644
+--- a/src/decompiler/typeop.cc
++++ b/src/decompiler/typeop.cc
+@@ -210,10 +210,20 @@ Datatype *TypeOp::propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz)
+   if (dt->getMetatype() != TYPE_PTR)
+     return (Datatype *)0;
+   Datatype *ptrto = ((TypePointer *)dt)->getPtrTo();
++  uint4 qualifiers = ptrto->getQualifiers();
++  while(ptrto->getSize() != sz && (ptrto->getMetatype() == TYPE_STRUCT || ptrto->getMetatype() == TYPE_ARRAY)) {
++    int8 offset = 0;
++    Datatype *component = ptrto->getSubType(0,&offset);
++    if (component == (Datatype *)0 || offset != 0) break;
++    ptrto = component;
++    qualifiers |= ptrto->getQualifiers();
++  }
+   if (ptrto->isVariableLength())
+     return (Datatype *)0;
+   if (ptrto->getSize() == sz)
+-    return ptrto;
++    return t->getQualifiedType(ptrto,qualifiers);
++  if ((qualifiers & Datatype::qualifier_volatile) != 0)
++    return t->getQualifiedType(t->getBase(sz,TYPE_UNKNOWN),qualifiers);
+   // If we reach here, there is a size mismatch between the pointer data-type and the dereferenced value.
+   // We only propagate (partial) enumerations in this case.
+   if (dt->isPointerRel()) {
+@@ -231,6 +241,20 @@ Datatype *TypeOp::propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz)
+ /// \param t is the TypeFactory used to construct data-types
+ /// \param opc is the op-code value the new object will represent
+ /// \param n is the display name that will represent the op-code
++Datatype *TypeOp::getValueType(Datatype *type)
++
++{
++  while(type != (Datatype *)0 && type->getQualifiers() != 0) {
++    Datatype *base = type->getUnqualified();
++    if (base == type) {
++      base = type->getTypedef(); // An intrinsically qualified typedef cannot name an unqualified value.
++      if (base == (Datatype *)0) break;
++    }
++    type = base;
++  }
++  return type;
++}
++
+ TypeOp::TypeOp(TypeFactory *t,OpCode opc,const string &n)
+ 
+ {
+@@ -475,7 +499,7 @@ Datatype *TypeOpLoad::getOutputToken(const PcodeOp *op,CastStrategy *castStrateg
+ {
+   Datatype *ct = op->getIn(1)->getHighTypeReadFacing(op);
+   if ((ct->getMetatype() == TYPE_PTR)&&(((TypePointer *)ct)->getPtrTo()->getSize() == op->getOut()->getSize()))
+-    return ((TypePointer *)ct)->getPtrTo();
++    return getValueType(((TypePointer *)ct)->getPtrTo());
+   //  return TypeOp::getOutputToken(op);
+   // The input to the load is not a pointer or (more likely)
+   // points to something of a different size than the output
+@@ -496,7 +520,7 @@ Datatype *TypeOpLoad::propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,
+     newtype = propagateToPointer(tlst,alttype,outvn->getSize(),spc->getWordSize());
+   }
+   else
+-    newtype = propagateFromPointer(tlst, alttype, outvn->getSize());
++    newtype = getValueType(propagateFromPointer(tlst, alttype, outvn->getSize()));
+   return newtype;
+ }
+ 
+@@ -874,6 +898,17 @@ Datatype *TypeOpCallother::getOutputLocal(const PcodeOp *op) const
+   return TypeOp::getOutputLocal(op);
+ }
+ 
++Datatype *TypeOpCallother::propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,Varnode *outvn,int4 inslot,int4 outslot)
++
++{
++  UserPcodeOp *userop = tlst->getArch()->userops.getOp(op->getIn(0)->getOffset());
++  if (userop->getType() != UserPcodeOp::volatile_read || op->getIn(1)->isAnnotation())
++    return (Datatype *)0;
++  if (inslot == 1 && outslot == -1)
++    return getValueType(propagateFromPointer(tlst,alttype,outvn->getSize()));
++  return (Datatype *)0;
++}
++
+ TypeOpReturn::TypeOpReturn(TypeFactory *t) : TypeOp(t,CPUI_RETURN,"return")
+ 
+ {
+@@ -1233,13 +1268,14 @@ Datatype *TypeOpIntAdd::propagateType(Datatype *alttype,PcodeOp *op,Varnode *inv
+ /// \param typegrp is the TypeFactory for constructing the transformed Datatype
+ /// \param op is the ADD operation
+ /// \param inslot is the edge to propagate along
++/// \param useTempType selects temporary inference types; false uses established Varnode types without touching shared temporary storage
+ /// \return the transformed Datatype or the original output Datatype
+-Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegrp,PcodeOp *op,int4 inslot)
++Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegrp,PcodeOp *op,int4 inslot,bool useTempType)
+ 
+ {
+   TypePointer *pointer = (TypePointer *)alttype;
+   uintb offset;
+-  int4 command = propagateAddPointer(offset,op,inslot,pointer->getPtrTo()->getAlignSize());
++  int4 command = propagateAddPointer(offset,op,inslot,pointer->getPtrTo()->getAlignSize(),useTempType);
+   if (command == 2) return (Datatype *)0; // Doesn't look like a good pointer add
+   TypePointer *parent = (TypePointer *)0;
+   int8 parentOff;
+@@ -1247,9 +1283,14 @@ Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegr
+     int8 typeOffset = AddrSpace::addressToByteInt(offset,pointer->getWordSize());
+     bool allowWrap = (op->code() != CPUI_PTRSUB);
+     do {
++      uint4 qualifiers = pointer->getPtrTo()->getQualifiers();
+       pointer = pointer->downChain(typeOffset,parent,parentOff,allowWrap,*typegrp);
+       if (pointer == (TypePointer *)0)
+ 	break;
++      if (qualifiers != 0) {
++        Datatype *component = typegrp->getQualifiedType(pointer->getPtrTo(),qualifiers);
++        pointer = typegrp->getTypePointer(pointer->getSize(),component,pointer->getWordSize());
++      }
+     } while(typeOffset != 0);
+   }
+   if (parent != (TypePointer *)0) {
+@@ -1286,8 +1327,9 @@ Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegr
+ /// \param op is the PcodeOp propagating the data-type
+ /// \param slot is the input edge being propagated
+ /// \param sz is the size of the data-type being pointed to
++/// \param useTempType selects temporary inference types or established Varnode types
+ /// \return a command indicating how the op should be treated
+-int4 TypeOpIntAdd::propagateAddPointer(uintb &off,PcodeOp *op,int4 slot,int4 sz)
++int4 TypeOpIntAdd::propagateAddPointer(uintb &off,PcodeOp *op,int4 slot,int4 sz,bool useTempType)
+ 
+ {
+   if (op->code() == CPUI_PTRADD) {
+@@ -1329,7 +1371,8 @@ int4 TypeOpIntAdd::propagateAddPointer(uintb &off,PcodeOp *op,int4 slot,int4 sz)
+ 	return 3;
+       return 2;
+     }
+-    if (othervn->getTempType()->getMetatype() == TYPE_PTR) // Check if othervn marked as ptr
++    Datatype *otherType = useTempType ? othervn->getTempType() : othervn->getType();
++    if (otherType->getMetatype() == TYPE_PTR) // Check if othervn marked as ptr
+       return 2;
+     off = othervn->getOffset();
+     return (off == 0) ? 0 : 1;
+@@ -2343,6 +2386,17 @@ TypeOpCast::TypeOpCast(TypeFactory *t) : TypeOp(t,CPUI_CAST,"(cast)")
+   behave = new OpBehavior(CPUI_CAST,false,true); // Dummy behavior
+ }
+ 
++Datatype *TypeOpCast::propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,Varnode *outvn,int4 inslot,int4 outslot)
++
++{
++  if (inslot != 0 || outslot != -1 || invn->getSize() != outvn->getSize())
++    return (Datatype *)0;
++  // An explicitly typed cast remains authoritative, including casts that remove qualifiers.
++  if (outvn->getType()->getMetatype() != TYPE_UNKNOWN)
++    return (Datatype *)0;
++  return alttype;
++}
++
+ void TypeOpCast::printRaw(ostream &s,const PcodeOp *op)
+ 
+ {
+@@ -2485,8 +2539,11 @@ Datatype *TypeOpPtrsub::getOutputToken(const PcodeOp *op,CastStrategy *castStrat
+     int8 unusedOffset;
+     TypePointer *unusedParent;
+     Datatype *rettype = ptype->downChain(offset,unusedParent,unusedOffset,false,*tlst);
+-    if ((offset==0)&&(rettype != (Datatype *)0))
+-      return rettype;
++    if ((offset==0)&&(rettype != (Datatype *)0)) {
++      TypePointer *result = (TypePointer *)rettype;
++      Datatype *component = tlst->getQualifiedType(result->getPtrTo(),ptype->getPtrTo()->getQualifiers());
++      return tlst->getTypePointer(result->getSize(),component,result->getWordSize());
++    }
+     rettype = tlst->getBase(1, TYPE_UNKNOWN);
+     return tlst->getTypePointer(op->getOut()->getSize(), rettype, ptype->getWordSize());
+   }
+diff --git a/src/decompiler/typeop.hh b/src/decompiler/typeop.hh
+index f919d6b..e20a3ca 100644
+--- a/src/decompiler/typeop.hh
++++ b/src/decompiler/typeop.hh
+@@ -193,6 +193,7 @@ public:
+   static OpCode floatSignManipulation(PcodeOp *op);
+   static Datatype *propagateToPointer(TypeFactory *t,Datatype *dt,int4 sz,int4 wordsz);
+   static Datatype *propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz);
++  static Datatype *getValueType(Datatype *type); ///< Drop only the accessed object's top-level qualifiers on a value
+ };
+ 
+ // Major classes of operations
+@@ -341,6 +342,7 @@ public:
+   virtual string getOperatorName(const PcodeOp *op) const;
+   virtual Datatype *getInputLocal(const PcodeOp *op,int4 slot) const;
+   virtual Datatype *getOutputLocal(const PcodeOp *op) const;
++  virtual Datatype *propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,Varnode *outvn,int4 inslot,int4 outslot);
+ };
+ 
+ /// \brief Information about the RETURN op-code
+@@ -442,8 +444,8 @@ public:
+   virtual Datatype *getOutputToken(const PcodeOp *op,CastStrategy *castStrategy) const;
+   virtual Datatype *propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,Varnode *outvn,
+ 				  int4 inslot,int4 outslot);
+-  static Datatype *propagateAddIn2Out(Datatype *alttype,TypeFactory *typegrp,PcodeOp *op,int4 inslot);
+-  static int4 propagateAddPointer(uintb &off,PcodeOp *op,int4 slot,int4 sz);
++  static Datatype *propagateAddIn2Out(Datatype *alttype,TypeFactory *typegrp,PcodeOp *op,int4 inslot,bool useTempType=true);
++  static int4 propagateAddPointer(uintb &off,PcodeOp *op,int4 slot,int4 sz,bool useTempType=true);
+ };
+ 
+ /// \brief Information about the INT_SUB op-code
+@@ -817,6 +819,7 @@ public:
+ class TypeOpCast : public TypeOp {
+ public:
+   TypeOpCast(TypeFactory *t);			///< Constructor
++  virtual Datatype *propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,Varnode *outvn,int4 inslot,int4 outslot);
+ 				// We don't care what types are cast
+ 				// So no input and output requirements
+   virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opCast(op); }
+diff --git a/src/decompiler/userop.cc b/src/decompiler/userop.cc
+index c9074bf..f685c78 100644
+--- a/src/decompiler/userop.cc
++++ b/src/decompiler/userop.cc
+@@ -118,6 +118,23 @@ string VolatileOp::appendSize(const string &base,int4 size)
+   return s.str();
+ }
+ 
++Datatype *VolatileOp::getMemoryType(const PcodeOp *op) const
++
++{
++  int4 size = type == volatile_read ? op->getOut()->getSize() : op->getIn(2)->getSize();
++  return TypeOp::propagateFromPointer(glb->types,op->getIn(1)->getType(),size);
++}
++
++Datatype *VolatileOp::getInputLocal(const PcodeOp *op,int4 slot) const
++
++{
++  if (slot != 1 || op->getIn(1)->isAnnotation()) return (Datatype *)0;
++  Datatype *memory = getMemoryType(op);
++  if (memory == (Datatype *)0) return (Datatype *)0;
++  AddrSpace *space = glb->getSpace(op->getIn(op->numInput()-1)->getOffset());
++  return glb->types->getTypePointer(op->getIn(1)->getSize(),memory,space->getWordSize());
++}
++
+ string VolatileReadOp::getOperatorName(const PcodeOp *op) const
+ 
+ {
+@@ -128,6 +145,8 @@ string VolatileReadOp::getOperatorName(const PcodeOp *op) const
+ Datatype *VolatileReadOp::getOutputLocal(const PcodeOp *op) const
+ 
+ {
++  if (!op->getIn(1)->isAnnotation())
++    return TypeOp::getValueType(getMemoryType(op));
+   if (!op->doesSpecialPropagation())
+     return (Datatype *)0;
+   const Address &addr ( op->getIn(1)->getAddr() ); // Address of volatile memory
+@@ -159,6 +178,10 @@ string VolatileWriteOp::getOperatorName(const PcodeOp *op) const
+ Datatype *VolatileWriteOp::getInputLocal(const PcodeOp *op,int4 slot) const
+ 
+ {
++  if (slot == 1)
++    return VolatileOp::getInputLocal(op,slot);
++  if (slot == 2 && !op->getIn(1)->isAnnotation())
++    return TypeOp::getValueType(getMemoryType(op));
+   if (!op->doesSpecialPropagation() || slot != 2)
+     return (Datatype *)0;
+   const Address &addr ( op->getIn(1)->getAddr() ); // Address of volatile memory
+diff --git a/src/decompiler/userop.hh b/src/decompiler/userop.hh
+index 6be1aba..af56e42 100644
+--- a/src/decompiler/userop.hh
++++ b/src/decompiler/userop.hh
+@@ -177,6 +177,8 @@ protected:
+ public:
+   VolatileOp(const string &nm,Architecture *g,uint4 tp,int4 ind)
+     : UserPcodeOp(nm,g,tp,ind) { }				///< Constructor
++  Datatype *getMemoryType(const PcodeOp *op) const; ///< Effective type of an indirect volatile access
++  virtual Datatype *getInputLocal(const PcodeOp *op,int4 slot) const;
+   virtual void decode(Decoder &decoder) {}			///< Currently volatile ops only need their name
+ };
+ 
+@@ -184,7 +186,7 @@ public:
+ ///
+ /// This CALLOTHER p-code operation takes as its input parameter, after the constant id,
+ /// a reference Varnode to the memory being read. The output returned by this operation
+-/// is the actual value read from memory.
++/// is the actual value read from memory. An indirect access instead supplies a pointer followed by a constant address-space index.
+ class VolatileReadOp : public VolatileOp {
+ public:
+   VolatileReadOp(const string &nm,Architecture *g,bool functional)
+@@ -200,6 +202,7 @@ public:
+ ///   - Constant id
+ ///   - Reference Varnode to the memory being written
+ ///   - The Varnode value being written to the memory
++/// An indirect access uses a pointer in place of the reference and appends a constant address-space index.
+ class VolatileWriteOp : public VolatileOp {
+ public:
+   VolatileWriteOp(const string &nm,Architecture *g,bool functional)
+diff --git a/src/unittests/testqualifiers.cc b/src/unittests/testqualifiers.cc
+index dc74a63..77f4fe3 100644
+--- a/src/unittests/testqualifiers.cc
++++ b/src/unittests/testqualifiers.cc
+@@ -1,7 +1,10 @@
+ #include "architecture.hh"
++#include "coreaction.hh"
++#include "funcdata.hh"
+ #include "libdecomp.hh"
+ #include "printc.hh"
+ #include "test.hh"
++#include "userop.hh"
+ 
+ namespace ghidra {
+ 
+@@ -259,4 +262,211 @@ TEST(qualified_type_incomplete_completion) {
+   ASSERT_EQUALS(unionAlias->getDepend(0),word);
+ }
+ 
++class QualifiedAccessEnvironment {
++public:
++  unique_ptr<Architecture> arch;
++  Funcdata *fd;
++  QualifiedAccessEnvironment(const string &bytes) {
++    startDecompilerLibrary(getenv("SLEIGHHOME"));
++    istringstream input("<binaryimage arch=\"x86:LE:64:default:gcc\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">" + bytes + "</bytechunk></binaryimage>");
++    DocumentStorage store;
++    Document *document = store.parseDocument(input);
++    store.registerTag(document->getRoot());
++    arch.reset(ArchitectureCapability::getCapability("xml")->buildArchitecture("","",&cout));
++    arch->init(store);
++    fd = arch->symboltab->getGlobalScope()->addFunction(Address(arch->getDefaultCodeSpace(),0x1000),"access")->getFunction();
++  }
++  void setInput(Datatype *type) {
++    PrototypePieces pieces;
++    pieces.model = arch->defaultfp;
++    pieces.outtype = arch->types->getBase(4,TYPE_UINT);
++    pieces.intypes.push_back(type);
++    pieces.innames.push_back("input");
++    pieces.firstVarArgSlot = -1;
++    fd->getFuncProto().setPieces(pieces);
++  }
++  void analyze(void) {
++    arch->allacts.getCurrent()->reset(*fd);
++    ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  }
++  int4 effects(uint4 type,bool indirect = true) {
++    int4 result = 0;
++    for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++      PcodeOp *op = (*iter).second;
++      if (op->isDead() || op->code() != CPUI_CALLOTHER) continue;
++      if (arch->userops.getOp(op->getIn(0)->getOffset())->getType() != type) continue;
++      ASSERT_EQUALS(!op->getIn(1)->isAnnotation(),indirect);
++      if (indirect) {
++        ASSERT_EQUALS(op->numInput(),type == UserPcodeOp::volatile_read ? 3 : 4);
++        ASSERT_EQUALS(op->getIn(op->numInput()-1)->getOffset(),arch->getDefaultDataSpace()->getIndex());
++        ASSERT(op->getIn(1)->getType()->getMetatype() == TYPE_PTR);
++        ASSERT(!op->getIn(1)->isVolatile());
++      }
++      ++result;
++    }
++    return result;
++  }
++  int4 loads(void) {
++    int4 result = 0;
++    for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++      PcodeOp *op = (*iter).second;
++      if (!op->isDead() && op->code() == CPUI_LOAD)
++        ++result;
++    }
++    return result;
++  }
++  string print(bool markup = false) {
++    ostringstream output;
++    arch->print->setOutputStream(&output);
++    arch->print->setMarkup(markup);
++    arch->print->docFunction(fd);
++    arch->print->setOutputStream((ostream *)0);
++    arch->print->setMarkup(false);
++    return output.str();
++  }
++};
++
++TEST(qualified_volatile_unused_read) {
++  for(int4 qualifiers : {0,(int4)Datatype::qualifier_const,(int4)Datatype::qualifier_volatile}) {
++    QualifiedAccessEnvironment env("0fb7070fb707c3");
++    TypeFactory *factory = env.arch->types;
++    Datatype *word = factory->getQualifiedType(factory->getBase(2,TYPE_UINT),qualifiers);
++    env.setInput(factory->getTypePointer(8,word,1));
++    env.analyze();
++    bool observable = qualifiers == Datatype::qualifier_volatile;
++    ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_read),observable ? 2 : 0);
++    ASSERT_EQUALS(env.loads(),observable ? 0 : 1);
++    Varnode *input = env.fd->findVarnodeInput(8,env.arch->translate->getRegister("RDI").getAddr());
++    ASSERT(input != (Varnode *)0);
++    ASSERT(!input->isReadOnly());
++    ASSERT(!input->isVolatile());
++    string text = env.print();
++    ASSERT(text.find("read_volatile") == string::npos);
++    if (observable) {
++      ASSERT(text.find("volatile") != string::npos);
++      ASSERT(text.find("volatile",text.find("volatile")+1) == string::npos);
++      size_t first = text.find("*input");
++      ASSERT(first != string::npos);
++      ASSERT(text.find("*input",first+1) != string::npos);
++      string xml = env.print(true);
++      ASSERT(xml.find("volatile") != string::npos);
++      ASSERT(xml.find("read_volatile") == string::npos);
++      ostringstream encoded;
++      XmlEncode encoder(encoded);
++      env.fd->encode(encoder,0,true,false);
++      string operation = "<op code=\"" + to_string(CPUI_CALLOTHER) + "\"";
++      size_t firstOp = encoded.str().find(operation);
++      ASSERT(firstOp != string::npos);
++      ASSERT(encoded.str().find(operation,firstOp+1) != string::npos);
++    }
++  }
++}
++
++TEST(qualified_volatile_derived_accesses) {
++  for(int4 kind=0;kind<5;++kind) {
++    // COPY to RAX, then a member/array offset, two unused reads and two writes to the same object.
++    QualifiedAccessEnvironment env("4889f84883c0020fb7100fb71066c700010066c70002000fb700c3");
++    TypeFactory *factory = env.arch->types;
++    Datatype *word = factory->getBase(2,TYPE_UINT);
++    Datatype *vol = factory->getQualifiedType(word,Datatype::qualifier_volatile);
++    Datatype *object = kind == 4 ? word : vol;
++    if (kind == 1)
++      object = factory->getQualifiedType(factory->getTypeArray(4,word),Datatype::qualifier_volatile);
++    else if (kind == 2 || kind == 3) {
++      TypeStruct *record = factory->getTypeStruct("AccessRecord");
++      vector<TypeField> fields = {TypeField(0,0,"first",word),TypeField(1,2,"value",kind == 2 ? word : vol)};
++      factory->setFields(fields,{},record,4,2,0);
++      object = kind == 2 ? factory->getQualifiedType(record,Datatype::qualifier_volatile) : record;
++      ASSERT_EQUALS(record->getDepend(1),kind == 2 ? word : vol);
++    }
++    env.setInput(factory->getTypePointer(8,object,1));
++    env.analyze();
++    ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_read),kind == 4 ? 0 : 3);
++    ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_write),kind == 4 ? 0 : 2);
++    ASSERT_EQUALS(env.loads(),kind == 4 ? 1 : 0);
++    string text = env.print();
++    ASSERT(text.find("read_volatile") == string::npos);
++    ASSERT(text.find("write_volatile") == string::npos);
++    ASSERT(text.find(" = 1;") != string::npos);
++    ASSERT(text.find(" = 2;") != string::npos);
++    ASSERT(text.find("volatile") != string::npos || kind >= 3);
++  }
++}
++
++TEST(qualified_volatile_first_component) {
++  QualifiedAccessEnvironment env("0fb7070fb707c3");
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT);
++  TypeStruct *record = factory->getTypeStruct("FirstComponent");
++  vector<TypeField> fields = {TypeField(0,0,"value",word),TypeField(1,2,"tail",word)};
++  factory->setFields(fields,{},record,4,2,0);
++  env.setInput(factory->getTypePointer(8,factory->getQualifiedType(record,Datatype::qualifier_volatile),1));
++  env.analyze();
++  ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_read),2);
++  string text = env.print();
++  ASSERT(text.find("volatile") != string::npos);
++  ASSERT(text.find("read_volatile") == string::npos);
++}
++
++TEST(qualified_pointer_object_not_pointee) {
++  QualifiedAccessEnvironment env("0fb7070fb707c3");
++  TypeFactory *factory = env.arch->types;
++  Datatype *pointer = factory->getQualifiedType(factory->getTypePointer(8,factory->getBase(2,TYPE_UINT),1),Datatype::qualifier_volatile);
++  env.setInput(pointer);
++  env.analyze();
++  ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_read),0);
++  ASSERT_EQUALS(env.loads(),1);
++}
++
++TEST(qualified_fixed_address_volatile_control) {
++  QualifiedAccessEnvironment env("0fb70425002000000fb7042500200000c3");
++  AddrSpace *ram = env.arch->getDefaultDataSpace();
++  Scope *global = env.arch->symboltab->getGlobalScope();
++  Symbol *device = global->addSymbol("device",env.arch->types->getBase(2,TYPE_UINT),Address(ram,0x2000),Address())->getSymbol();
++  global->setAttribute(device,Varnode::typelock | Varnode::namelock | Varnode::volatil);
++  env.arch->symboltab->setPropertyRange(Varnode::volatil,Range(ram,0x2000,0x2001));
++  env.analyze();
++  ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_read,false),2);
++  string text = env.print();
++  size_t first = text.find("device");
++  ASSERT(first != string::npos);
++  ASSERT(text.find("device",first+1) != string::npos);
++}
++
++TEST(qualified_volatile_nonconstant_store_value) {
++  // Compute source+1 in AX, store it through RDI, and return that same nonconstant value.
++  QualifiedAccessEnvironment env("6689f06683c0016689070fb7c0c3");
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT);
++  env.setInput(factory->getTypePointer(8,factory->getQualifiedType(word,Datatype::qualifier_volatile),1));
++  PrototypePieces pieces;
++  env.fd->getFuncProto().getPieces(pieces);
++  pieces.intypes.push_back(word);
++  pieces.innames.push_back("source");
++  env.fd->getFuncProto().setPieces(pieces);
++  env.analyze();
++  ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_write),1);
++  ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_read),0);
++  PcodeOp *store = (PcodeOp *)0;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (!op->isDead() && op->code() == CPUI_CALLOTHER && env.arch->userops.getOp(op->getIn(0)->getOffset())->getType() == UserPcodeOp::volatile_write)
++      store = op;
++  }
++  ASSERT(store != (PcodeOp *)0);
++  Varnode *value = store->getIn(2);
++  ASSERT(!value->isConstant());
++  ASSERT(!value->isTypeLock());
++  Varnode *source = env.fd->findVarnodeInput(2,env.arch->translate->getRegister("SI").getAddr());
++  ASSERT(source != (Varnode *)0);
++  ASSERT(source->isTypeLock());
++  Datatype *valueType = value->getHighTypeReadFacing(store);
++  string text = env.print();
++  ASSERT_EQUALS(source->getType(),word);
++  ASSERT_EQUALS(store->inputTypeLocal(2)->getQualifiers(),0);
++  ASSERT_EQUALS(value->getType()->getQualifiers(),0);
++  ASSERT_EQUALS(valueType->getQualifiers(),0);
++  ASSERT(text.find("volatile",text.find("volatile")+1) == string::npos);
++}
++
+ } // End namespace ghidra
