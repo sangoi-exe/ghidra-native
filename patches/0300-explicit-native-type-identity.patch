@@ -1,0 +1,497 @@
+diff --git a/src/decompiler/type.cc b/src/decompiler/type.cc
+index a5cb0d0..7b0d1ae 100644
+--- a/src/decompiler/type.cc
++++ b/src/decompiler/type.cc
+@@ -484,6 +484,8 @@ void Datatype::encodeBasic(type_metatype meta,int4 align,Encoder &encoder) const
+ 
+ {
+   encoder.writeString(ATTRIB_NAME, name);
++  if (displayName != name)
++    encoder.writeString(ATTRIB_LABEL, displayName);
+   uint8 saveId = getUnsizedId();
+   if (saveId != 0) {
+     encoder.writeUnsignedInteger(ATTRIB_ID, saveId);
+@@ -566,7 +568,9 @@ void Datatype::encodeTypedef(Encoder &encoder) const
+ {
+   encoder.openElement(ELEM_DEF);
+   encoder.writeString(ATTRIB_NAME, name);
+-  encoder.writeUnsignedInteger(ATTRIB_ID, id);
++  if (displayName != name)
++    encoder.writeString(ATTRIB_LABEL, displayName);
++  encoder.writeUnsignedInteger(ATTRIB_ID, getUnsizedId());
+   uint4 format = getDisplayFormat();
+   if (format != 0)
+     encoder.writeString(ATTRIB_FORMAT,Datatype::decodeIntegerFormat(format));
+@@ -1693,7 +1697,7 @@ void TypeEnum::encode(Encoder &encoder) const
+   for(iter=namemap.begin();iter!=namemap.end();++iter) {
+     encoder.openElement(ELEM_VAL);
+     encoder.writeString(ATTRIB_NAME,(*iter).second);
+-    encoder.writeUnsignedInteger(ATTRIB_VALUE, (*iter).first);
++    encoder.writeSignedInteger(ATTRIB_VALUE, (intb)(*iter).first);
+     encoder.closeElement(ELEM_VAL);
+   }
+   encoder.closeElement(ELEM_TYPE);
+@@ -4130,6 +4134,14 @@ void TypeFactory::orderRecurse(vector<Datatype *> &deporder,DatatypeSet &mark,
+     orderRecurse(deporder,mark,ct->qualifiedBase);
+   if (ct->typedefImm != (Datatype *)0)
+     orderRecurse(deporder,mark,ct->typedefImm);
++  if (ct->getMetatype() == TYPE_CODE) {
++    const FuncProto *prototype = ((TypeCode *)ct)->getPrototype();
++    if (prototype != (const FuncProto *)0) {
++      orderRecurse(deporder,mark,prototype->getOutputType());
++      for(int4 i=0;i<prototype->numParams();++i)
++        orderRecurse(deporder,mark,prototype->getParam(i)->getType());
++    }
++  }
+   int4 size = ct->numDepend();
+   for(int4 i=0;i<size;++i)
+     orderRecurse(deporder,mark,ct->getDepend(i));
+@@ -4520,14 +4532,16 @@ TypeArray *TypeFactory::getTypeArray(int4 as,Datatype *ao)
+ 
+ /// The created structure will be incomplete and have no fields. They must be added later.
+ /// \param n is the name of the structure
++/// \param id is the explicit identity (or zero to hash the name)
++/// \param label is the display name (or empty to use the name)
+ /// \return the TypeStruct object
+-TypeStruct *TypeFactory::getTypeStruct(const string &n)
++TypeStruct *TypeFactory::getTypeStruct(const string &n,uint8 id,const string &label)
+ 
+ {
+   TypeStruct tmp;
+   tmp.name = n;
+-  tmp.displayName = n;
+-  tmp.id = Datatype::hashName(n);
++  tmp.displayName = label.empty() ? n : label;
++  tmp.id = (id == 0) ? Datatype::hashName(n) : id;
+   return (TypeStruct *) findAdd(tmp);
+ }
+ 
+@@ -4546,14 +4560,16 @@ TypePartialStruct *TypeFactory::getTypePartialStruct(Datatype *contain,int4 off,
+ 
+ /// The created union will be incomplete and have no fields. They must be added later.
+ /// \param n is the name of the union
++/// \param id is the explicit identity (or zero to hash the name)
++/// \param label is the display name (or empty to use the name)
+ /// \return the TypeUnion object
+-TypeUnion *TypeFactory::getTypeUnion(const string &n)
++TypeUnion *TypeFactory::getTypeUnion(const string &n,uint8 id,const string &label)
+ 
+ {
+   TypeUnion tmp;
+   tmp.name = n;
+-  tmp.displayName = n;
+-  tmp.id = Datatype::hashName(n);
++  tmp.displayName = label.empty() ? n : label;
++  tmp.id = (id == 0) ? Datatype::hashName(n) : id;
+   return (TypeUnion *) findAdd(tmp);
+ }
+ 
+@@ -4573,12 +4589,15 @@ TypePartialUnion *TypeFactory::getTypePartialUnion(TypeUnion *contain,int4 off,i
+ /// The created enumeration will have no named values and a default configuration
+ /// Named values must be added later.
+ /// \param n is the name of the enumeration
++/// \param id is the explicit identity (or zero to hash the name)
++/// \param label is the display name (or empty to use the name)
+ /// \return the TypeEnum object
+-TypeEnum *TypeFactory::getTypeEnum(const string &n)
++TypeEnum *TypeFactory::getTypeEnum(const string &n,uint8 id,const string &label)
+ 
+ {
+   TypeEnum tmp(enumsize,enumtype,n);
+-  tmp.id = Datatype::hashName(n);
++  tmp.displayName = label.empty() ? n : label;
++  tmp.id = (id == 0) ? Datatype::hashName(n) : id;
+   return (TypeEnum *) findAdd(tmp);
+ }
+ 
+@@ -4608,10 +4627,15 @@ TypeSpacebase *TypeFactory::getTypeSpacebase(AddrSpace *id,const Address &addr)
+ 
+ /// Creates a TypeCode object and associates a specific function prototype with it.
+ /// \param proto is the list of names, data-types, and other attributes of the prototype
++/// \param n is the data-type name (or empty for anonymous interning)
++/// \param id is the explicit identity (or zero to hash a non-empty name)
+ /// \return the TypeCode object
+-TypeCode *TypeFactory::getTypeCode(const PrototypePieces &proto)
++TypeCode *TypeFactory::getTypeCode(const PrototypePieces &proto,const string &n,uint8 id)
+ {
+-  TypeCode tc;		// getFuncdata type with no name
++  TypeCode tc;
++  tc.name = n;
++  tc.displayName = n;
++  tc.id = (id == 0 && !n.empty()) ? Datatype::hashName(n) : id;
+   tc.setPrototype(this,proto,getTypeVoid());
+   tc.markComplete();
+   return (TypeCode *) findAdd(tc);
+@@ -4925,6 +4949,7 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
+ {
+   uint8 id = 0;
+   string nm;
++  string label;
+   uint4 format = 0;		// No forced display format by default
+ //  uint4 elemId = decoder.openElement();
+   for(;;) {
+@@ -4936,6 +4961,9 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
+     else if (attribId == ATTRIB_NAME) {
+       nm = decoder.readString();
+     }
++    else if (attribId == ATTRIB_LABEL) {
++      label = decoder.readString();
++    }
+     else if (attribId == ATTRIB_FORMAT) {
+       format = Datatype::encodeIntegerFormat(decoder.readString());
+     }
+@@ -4967,10 +4995,15 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
+ 	if (prevUnion->field.size() != defedUnion->field.size())
+ 	  setFields(defedUnion->field,prevUnion,defedUnion->size,defedUnion->alignment,defedUnion->flags);
+       }
++      if (!label.empty())
++        prev->displayName = label;
+       return prev;
+     }
+   }
+-  return getTypedef(defedType, nm, id, format);
++  Datatype *res = getTypedef(defedType, nm, id, format);
++  if (!label.empty())
++    res->displayName = label;
++  return res;
+ }
+ 
+ /// \param decoder is the stream decoder
+diff --git a/src/decompiler/type.hh b/src/decompiler/type.hh
+index 942e076..46806be 100644
+--- a/src/decompiler/type.hh
++++ b/src/decompiler/type.hh
+@@ -924,14 +924,14 @@ public:
+   TypePointer *getTypePointer(int4 s,Datatype *pt,uint4 ws);	///< Construct an absolute pointer data-type
+   TypePointer *getTypePointer(int4 s,Datatype *pt,uint4 ws,const string &n);	///< Construct a named pointer data-type
+   TypeArray *getTypeArray(int4 as,Datatype *ao);		///< Construct an array data-type
+-  TypeStruct *getTypeStruct(const string &n);			///< Create an (empty) structure
++  TypeStruct *getTypeStruct(const string &n,uint8 id=0,const string &label="");	///< Create an (empty) structure
+   TypePartialStruct *getTypePartialStruct(Datatype *contain,int4 off,int4 sz);	///< Create a partial structure
+-  TypeUnion *getTypeUnion(const string &n);			///< Create an (empty) union
++  TypeUnion *getTypeUnion(const string &n,uint8 id=0,const string &label="");	///< Create an (empty) union
+   TypePartialUnion *getTypePartialUnion(TypeUnion *contain,int4 off,int4 sz);	///< Create a partial union
+-  TypeEnum *getTypeEnum(const string &n);			///< Create an (empty) enumeration
++  TypeEnum *getTypeEnum(const string &n,uint8 id=0,const string &label="");	///< Create an (empty) enumeration
+   TypePartialEnum *getTypePartialEnum(TypeEnum *contain,int4 off,int4 sz);	///< Create a partial enumeration
+   TypeSpacebase *getTypeSpacebase(AddrSpace *id,const Address &addr);	///< Create a "spacebase" type
+-  TypeCode *getTypeCode(const PrototypePieces &proto);			///< Create a "function" datatype
++  TypeCode *getTypeCode(const PrototypePieces &proto,const string &n="",uint8 id=0);	///< Create a "function" datatype
+   Datatype *getQualifiedType(Datatype *ct,uint4 qualifiers);	///< Add const/volatile without changing the canonical concrete type
+   Datatype *getTypedef(Datatype *ct,const string &name,uint8 id,uint4 format);	///< Create a new \e typedef data-type
+   TypePointerRel *getTypePointerRel(TypePointer *parentPtr,Datatype *ptrTo,int4 off);	///< Get pointer offset relative to a container
+diff --git a/src/unittests/testidentity.cc b/src/unittests/testidentity.cc
+new file mode 100644
+index 0000000..444e0e2
+--- /dev/null
++++ b/src/unittests/testidentity.cc
+@@ -0,0 +1,309 @@
++#include "architecture.hh"
++#include "libdecomp.hh"
++#include "printc.hh"
++#include "test.hh"
++
++namespace ghidra {
++
++class IdentityEnvironment {
++public:
++  Architecture *arch;
++  IdentityEnvironment(void) {
++    startDecompilerLibrary(getenv("SLEIGHHOME"));
++    istringstream input("<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">cb</bytechunk></binaryimage>");
++    DocumentStorage store;
++    Document *document = store.parseDocument(input);
++    store.registerTag(document->getRoot());
++    arch = ArchitectureCapability::getCapability("xml")->buildArchitecture("","",&cout);
++    arch->init(store);
++  }
++  ~IdentityEnvironment(void) { delete arch; }
++};
++
++class IdentityPrinter : public PrintC {
++public:
++  IdentityPrinter(Architecture *arch) : PrintC(arch) { initializeFromArchitecture(); }
++  string declaration(const Datatype *type) {
++    ostringstream output;
++    clear();
++    setOutputStream(&output);
++    pushTypeStart(type,false);
++    pushAtom(Atom("value",syntax,EmitMarkup::no_color));
++    pushTypeEnd(type);
++    recurse();
++    emit->flush();
++    setOutputStream((ostream *)0);
++    return output.str();
++  }
++};
++
++static Datatype *identityNameReference(TypeFactory *factory,const string &name) {
++  ostringstream output;
++  XmlEncode encoder(output);
++  encoder.openElement(ELEM_TYPEREF);
++  encoder.writeString(ATTRIB_NAME,name);
++  encoder.closeElement(ELEM_TYPEREF);
++  istringstream input(output.str());
++  XmlDecode decoder(factory->getArch());
++  decoder.ingestStream(input);
++  return factory->decodeType(decoder);
++}
++
++class IdentityTypes {
++public:
++  TypeFactory *factory;
++  Datatype *word;
++  TypeStruct *record;
++  TypeUnion *choice;
++  TypeEnum *mode;
++  TypeCode *callback;
++  TypeCode *nearCallback;
++  vector<Datatype *> cases;
++  IdentityTypes(Architecture *arch) {
++    factory = arch->types;
++    word = factory->getBase(2,TYPE_UINT,"IdentityWord");
++    Datatype *ordinaryRecord = factory->getTypedef(word,"Alias",101,0);
++    record = factory->getTypeStruct("Alias",102,"struct Alias");
++    Datatype *qualifiedRecord = factory->getQualifiedType(record,Datatype::qualifier_const);
++    Datatype *recordAlias = factory->getTypedef(qualifiedRecord,"RecordAlias",103,0);
++    Datatype *qualifiedAlias = factory->getQualifiedType(recordAlias,Datatype::qualifier_volatile);
++    Datatype *ordinaryChoice = factory->getTypedef(word,"Choice",201,0);
++    choice = factory->getTypeUnion("Choice",202,"union Choice");
++    Datatype *qualifiedChoice = factory->getQualifiedType(choice,Datatype::qualifier_volatile);
++    Datatype *choiceAlias = factory->getTypedef(qualifiedChoice,"ChoiceAlias",203,0);
++    Datatype *ordinaryMode = factory->getTypedef(word,"Mode",301,0);
++    mode = factory->getTypeEnum("Mode",302,"enum Mode");
++    factory->setEnumValues({{1,"enabled"}},mode);
++    Datatype *qualifiedMode = factory->getQualifiedType(mode,Datatype::qualifier_const);
++    PrototypePieces signature;
++    signature.model = arch->getModel("__cdecl16far");
++    signature.name = "not_the_datatype_name";
++    signature.outtype = word;
++    signature.intypes.push_back(factory->getTypePointer(2,qualifiedRecord,1));
++    signature.innames.push_back("input");
++    signature.firstVarArgSlot = -1;
++    callback = factory->getTypeCode(signature,"Callback",401);
++    Datatype *callbackAlias = factory->getTypedef(callback,"CallbackAlias",403,0);
++    signature.model = arch->getModel("__stdcall16near");
++    nearCallback = factory->getTypeCode(signature,"Callback",402);
++    cases = {word,ordinaryRecord,record,qualifiedRecord,recordAlias,qualifiedAlias,
++      ordinaryChoice,choice,qualifiedChoice,choiceAlias,ordinaryMode,mode,qualifiedMode,
++      callback,nearCallback,callbackAlias};
++  }
++  void complete(void) {
++    Datatype *qualifiedRecord = cases[3];
++    vector<TypeField> fields = {TypeField(0,0,"value",word),
++      TypeField(1,2,"next",factory->getTypePointer(2,qualifiedRecord,1))};
++    factory->setFields(fields,{},record,4,2,0);
++    factory->setFields({TypeField(0,0,"value",word)},choice,2,2,0);
++  }
++};
++
++TEST(explicit_native_identity) {
++  IdentityEnvironment env;
++  IdentityTypes types(env.arch);
++  TypeFactory *factory = env.arch->types;
++  ASSERT_EQUALS(types.record->getId(),102);
++  ASSERT_EQUALS(types.record->getName(),"Alias");
++  ASSERT_EQUALS(types.record->getTypedef(),(Datatype *)0);
++  ASSERT_EQUALS(types.cases[1]->getName(),"Alias");
++  ASSERT_EQUALS(types.cases[1]->getId(),101);
++  ASSERT_EQUALS(types.cases[1]->getTypedef(),types.word);
++  ASSERT_EQUALS(types.cases[1]->getMetatype(),TYPE_UINT);
++  ASSERT_NOT_EQUALS(types.record,types.cases[1]);
++  ASSERT_EQUALS(factory->getTypeStruct("Alias",102,"struct Alias"),types.record);
++  ASSERT_EQUALS(factory->getTypeUnion("Choice",202,"union Choice"),types.choice);
++  ASSERT_EQUALS(types.mode->getId(),302);
++  ASSERT_EQUALS(types.mode->getMetatype(),TYPE_UINT);
++  ASSERT(types.mode->isEnumType());
++  ASSERT(types.mode->hasNamedValue(1));
++  TypeStruct *other = factory->getTypeStruct("Alias",104,"struct OtherAlias");
++  ASSERT_NOT_EQUALS(other,types.record);
++  ASSERT_EQUALS(other->getId(),104);
++  bool rejected = false;
++  try {
++    factory->getTypeUnion("Alias",102,"union Alias");
++  }
++  catch(LowlevelError &) {
++    rejected = true;
++  }
++  ASSERT(rejected);
++  TypeStruct *defaultRecord = factory->getTypeStruct("DefaultRecord");
++  ASSERT_EQUALS(identityNameReference(factory,"DefaultRecord"),defaultRecord);
++  ASSERT_EQUALS(defaultRecord->getDisplayName(),"DefaultRecord");
++  ASSERT_EQUALS(factory->getTypeStruct("DefaultRecord",0,""),defaultRecord);
++  TypeUnion *defaultUnion = factory->getTypeUnion("DefaultUnion");
++  ASSERT_EQUALS(identityNameReference(factory,"DefaultUnion"),defaultUnion);
++  ASSERT_EQUALS(defaultUnion->getDisplayName(),"DefaultUnion");
++  TypeEnum *defaultEnum = factory->getTypeEnum("DefaultEnum");
++  ASSERT_EQUALS(identityNameReference(factory,"DefaultEnum"),defaultEnum);
++  ASSERT_EQUALS(defaultEnum->getDisplayName(),"DefaultEnum");
++  IdentityPrinter printer(env.arch);
++  ASSERT_EQUALS(printer.declaration(types.cases[1]),"Alias value");
++  ASSERT_EQUALS(printer.declaration(types.record),"struct Alias value");
++  ASSERT_EQUALS(printer.declaration(types.choice),"union Choice value");
++  ASSERT_EQUALS(printer.declaration(types.mode),"enum Mode value");
++  ASSERT_EQUALS(printer.declaration(types.cases[3]),"const struct Alias value");
++  ASSERT_EQUALS(printer.declaration(types.cases[4]),"RecordAlias value");
++  types.complete();
++  for(int4 i : {2,3,4,5,7,8,9}) {
++    ASSERT_EQUALS(types.cases[i]->isIncomplete(),false);
++  }
++  ASSERT_EQUALS(types.cases[3]->getUnqualified(),types.record);
++  ASSERT_EQUALS(types.cases[4]->getTypedef(),types.cases[3]);
++  ASSERT_EQUALS(types.cases[5]->getUnqualified(),types.cases[4]);
++  ASSERT_EQUALS(types.cases[3]->getDisplayName(),"struct Alias");
++  ASSERT_EQUALS(types.cases[4]->getDisplayName(),"RecordAlias");
++  ASSERT_EQUALS(types.cases[5]->getDisplayName(),"RecordAlias");
++  ASSERT_EQUALS(types.cases[8]->getDisplayName(),"union Choice");
++  ASSERT_EQUALS(types.cases[9]->getDisplayName(),"ChoiceAlias");
++  ASSERT_EQUALS(((TypePointer *)types.record->getDepend(1))->getPtrTo(),types.cases[3]);
++  ASSERT_EQUALS(printer.declaration(types.cases[3]),"const struct Alias value");
++}
++
++TEST(explicit_native_code_identity) {
++  IdentityEnvironment env;
++  IdentityTypes types(env.arch);
++  TypeFactory *factory = env.arch->types;
++  ASSERT_EQUALS(types.callback->getMetatype(),TYPE_CODE);
++  ASSERT_EQUALS(types.callback->getName(),"Callback");
++  ASSERT_EQUALS(types.callback->getId(),401);
++  ASSERT_EQUALS(types.callback->getTypedef(),(Datatype *)0);
++  ASSERT_EQUALS(types.callback->getPrototype()->getModelName(),"__cdecl16far");
++  ASSERT_EQUALS(types.nearCallback->getName(),"Callback");
++  ASSERT_EQUALS(types.nearCallback->getId(),402);
++  ASSERT_EQUALS(types.nearCallback->getPrototype()->getModelName(),"__stdcall16near");
++  ASSERT_EQUALS(types.callback->getPrototype()->getParam(0)->getAddress().getOffset(),4);
++  ASSERT_EQUALS(types.nearCallback->getPrototype()->getParam(0)->getAddress().getOffset(),2);
++  ASSERT_NOT_EQUALS(types.callback,types.nearCallback);
++  ASSERT_EQUALS(types.cases[15]->getTypedef(),types.callback);
++  ASSERT_EQUALS(types.cases[15]->getDisplayName(),"CallbackAlias");
++  PrototypePieces signature;
++  signature.model = env.arch->getModel("__cdecl16far");
++  signature.name = "ignored_for_anonymous_identity";
++  signature.outtype = types.word;
++  signature.intypes.push_back(factory->getTypePointer(2,types.cases[3],1));
++  signature.innames.push_back("input");
++  signature.firstVarArgSlot = -1;
++  ASSERT_EQUALS(factory->getTypeCode(signature,"Callback",401),types.callback);
++  TypeCode *anonymous = factory->getTypeCode(signature);
++  ASSERT_EQUALS(anonymous->getName(),"");
++  ASSERT_EQUALS(anonymous->getId(),0);
++  ASSERT_EQUALS(factory->getTypeCode(signature),anonymous);
++  ASSERT_NOT_EQUALS(anonymous,types.callback);
++  ASSERT_EQUALS(factory->getTypeCode()->getPrototype(),(const FuncProto *)0);
++  ASSERT_NOT_EQUALS(factory->getTypeCode(),anonymous);
++  TypeCode *namedDefault = factory->getTypeCode(signature,"NamedDefault");
++  ASSERT_EQUALS(identityNameReference(factory,"NamedDefault"),namedDefault);
++  ASSERT_EQUALS(namedDefault->getDisplayName(),"NamedDefault");
++  ASSERT_EQUALS(namedDefault->getPrototype()->getModelName(),"__cdecl16far");
++}
++
++template<typename Encode,typename Decode> static void identityCodecRoundTrip(void) {
++  IdentityEnvironment source;
++  IdentityTypes types(source.arch);
++  IdentityEnvironment restored;
++  TypeFactory *target = restored.arch->types;
++  vector<Datatype *> actual;
++  for(int4 phase=0;phase<2;++phase) {
++    if (phase == 1)
++      types.complete();
++    ostringstream output;
++    Encode encoder(output);
++    encoder.openElement(ELEM_DATA);
++    types.factory->encode(encoder);
++    for(Datatype *type : types.cases) {
++      type->encodeRef(encoder);
++      type->encode(encoder);
++    }
++    encoder.closeElement(ELEM_DATA);
++    istringstream input(output.str());
++    Decode decoder(restored.arch);
++    decoder.ingestStream(input);
++    uint4 data = decoder.openElement(ELEM_DATA);
++    target->decode(decoder);
++    for(uint4 i=0;i<types.cases.size();++i) {
++      Datatype *type = types.cases[i];
++      Datatype *result = target->decodeType(decoder);
++      Datatype *definition = target->decodeType(decoder);
++      ASSERT_EQUALS(definition,result);
++      if (phase == 0)
++        actual.push_back(result);
++      else
++        ASSERT_EQUALS(actual[i],result);
++      ASSERT_EQUALS(result->getName(),type->getName());
++      ASSERT_EQUALS(result->getId(),type->getId());
++      ASSERT_EQUALS(result->getMetatype(),type->getMetatype());
++      ASSERT_EQUALS(result->getDisplayName(),type->getDisplayName());
++      ASSERT_EQUALS(result->getQualifiers(),type->getQualifiers());
++      ASSERT_EQUALS(result->getSize(),type->getSize());
++      ASSERT_EQUALS(result->isIncomplete(),type->isIncomplete());
++      IdentityPrinter originalPrinter(source.arch);
++      IdentityPrinter restoredPrinter(restored.arch);
++      ASSERT_EQUALS(restoredPrinter.declaration(result),originalPrinter.declaration(type));
++    }
++    decoder.closeElement(data);
++    ASSERT_EQUALS(actual[1]->getTypedef(),actual[0]);
++    ASSERT_EQUALS(actual[3]->getUnqualified(),actual[2]);
++    ASSERT_EQUALS(actual[4]->getTypedef(),actual[3]);
++    ASSERT_EQUALS(actual[5]->getUnqualified(),actual[4]);
++    ASSERT_EQUALS(actual[9]->getTypedef(),actual[8]);
++    ASSERT_EQUALS(actual[12]->getUnqualified(),actual[11]);
++    ASSERT(((TypeEnum *)actual[11])->hasNamedValue(1));
++    ASSERT_EQUALS(actual[15]->getTypedef(),actual[13]);
++    for(int4 i : {13,14,15}) {
++      const FuncProto *prototype = ((TypeCode *)actual[i])->getPrototype();
++      ASSERT_EQUALS(prototype->getModelName(),i == 14 ? "__stdcall16near" : "__cdecl16far");
++      ASSERT_EQUALS(prototype->numParams(),1);
++      ASSERT_EQUALS(prototype->getOutputType(),actual[0]);
++      ASSERT_EQUALS(((TypePointer *)prototype->getParam(0)->getType())->getPtrTo(),actual[3]);
++      ASSERT_EQUALS(prototype->getParam(0)->getAddress().getOffset(),i == 14 ? 2 : 4);
++    }
++  }
++  ASSERT_EQUALS(actual[2]->getDisplayName(),"struct Alias");
++  ASSERT_EQUALS(((TypePointer *)actual[2]->getDepend(1))->getPtrTo(),actual[3]);
++}
++
++TEST(explicit_native_identity_xml_roundtrip) { identityCodecRoundTrip<XmlEncode,XmlDecode>(); }
++TEST(explicit_native_identity_packed_roundtrip) { identityCodecRoundTrip<PackedEncode,PackedDecode>(); }
++
++template<typename Encode,typename Decode> static void typedefLabelRoundTrip(void) {
++  IdentityEnvironment source;
++  IdentityTypes types(source.arch);
++  istringstream definition("<def name=\"LabeledAlias\" id=\"501\" label=\"AliasView\"><typeref name=\"Alias\" id=\"102\"/></def>");
++  XmlDecode inputDecoder(source.arch);
++  inputDecoder.ingestStream(definition);
++  Datatype *alias = types.factory->decodeType(inputDecoder);
++  ASSERT_EQUALS(alias->getTypedef(),types.record);
++  ASSERT_EQUALS(alias->getDisplayName(),"AliasView");
++  Datatype *qualifiedAlias = types.factory->getQualifiedType(alias,Datatype::qualifier_const);
++  types.complete();
++  ASSERT_EQUALS(alias->isIncomplete(),false);
++  ostringstream output;
++  Encode encoder(output);
++  encoder.openElement(ELEM_DATA);
++  types.factory->encode(encoder);
++  qualifiedAlias->encodeRef(encoder);
++  encoder.closeElement(ELEM_DATA);
++  IdentityEnvironment restored;
++  istringstream input(output.str());
++  Decode decoder(restored.arch);
++  decoder.ingestStream(input);
++  uint4 data = decoder.openElement(ELEM_DATA);
++  restored.arch->types->decode(decoder);
++  Datatype *actual = restored.arch->types->decodeType(decoder);
++  decoder.closeElement(data);
++  ASSERT_EQUALS(actual->getName(),"LabeledAlias");
++  ASSERT_EQUALS(actual->getDisplayName(),"AliasView");
++  ASSERT_EQUALS(actual->getUnqualified()->getId(),501);
++  ASSERT_EQUALS(actual->getUnqualified()->getTypedef()->getId(),102);
++  ASSERT_EQUALS(actual->getUnqualified()->getTypedef()->getDisplayName(),"struct Alias");
++  ASSERT_EQUALS(actual->isIncomplete(),false);
++  IdentityPrinter printer(restored.arch);
++  ASSERT_EQUALS(printer.declaration(actual),"const AliasView value");
++}
++
++TEST(explicit_native_typedef_label_xml_roundtrip) { typedefLabelRoundTrip<XmlEncode,XmlDecode>(); }
++TEST(explicit_native_typedef_label_packed_roundtrip) { typedefLabelRoundTrip<PackedEncode,PackedDecode>(); }
++
++} // End namespace ghidra
