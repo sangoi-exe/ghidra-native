@@ -1,0 +1,905 @@
+diff --git a/src/decompiler/marshal.cc b/src/decompiler/marshal.cc
+--- a/src/decompiler/marshal.cc
++++ b/src/decompiler/marshal.cc
+@@ -1258,7 +1258,8 @@
+ AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+ AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
+ 
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",160); // Number serves as next open index
++AttributeId ATTRIB_QUALIFIERS = AttributeId("qualifiers",160);
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",161); // Number serves as next open index
+ 
+ 
+ ElementId ELEM_DATA = ElementId("data",1);
+@@ -1272,6 +1273,7 @@
+ ElementId ELEM_VALUE = ElementId("value",9);
+ ElementId ELEM_VOID = ElementId("void",10);
+ 
+-ElementId ELEM_UNKNOWN = ElementId("XMLunknown",291); // Number serves as next open index
++ElementId ELEM_QUALIFIED_TYPE = ElementId("qualified_type",291);
++ElementId ELEM_UNKNOWN = ElementId("XMLunknown",292); // Number serves as next open index
+ 
+ } // End namespace ghidra
+diff --git a/src/decompiler/marshal.hh b/src/decompiler/marshal.hh
+--- a/src/decompiler/marshal.hh
++++ b/src/decompiler/marshal.hh
+@@ -675,6 +675,8 @@
+ }
+ 
+ extern ElementId ELEM_UNKNOWN;		///< Special element to represent an element with an unrecognized name
++extern AttributeId ATTRIB_QUALIFIERS; ///< Applied const/volatile qualifiers on a canonical type reference
++extern ElementId ELEM_QUALIFIED_TYPE; ///< Qualified reference, decoded to an existing concrete class
+ extern AttributeId ATTRIB_UNKNOWN;	///< Special attribute  to represent an attribute with an unrecognized name
+ extern AttributeId ATTRIB_CONTENT;	///< Special attribute for XML text content of an element
+ 
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -72,6 +72,9 @@
+ // Operator tokens for type expressions
+ OpToken PrintC::type_expr_space = { "", "", 2, 10, false, OpToken::space, 1, 0, (OpToken *)0 };
+ OpToken PrintC::type_expr_nospace = { "", "", 2, 10, false, OpToken::space, 0, 0, (OpToken *)0 };
++OpToken PrintC::const_expr = { "const", "", 1, 62, false, OpToken::unary_prefix, 1, 0, (OpToken *)0 };
++OpToken PrintC::volatile_expr = { "volatile", "", 1, 62, false, OpToken::unary_prefix, 1, 0, (OpToken *)0 };
++OpToken PrintC::const_volatile_expr = { "const volatile", "", 1, 62, false, OpToken::unary_prefix, 1, 0, (OpToken *)0 };
+ OpToken PrintC::ptr_expr = { "*", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+ OpToken PrintC::array_expr = { "[", "]", 2, 66, false, OpToken::postsurround, 1, 0, (OpToken *)0 };
+ OpToken PrintC::enum_cat = { "|", "", 2, 26, true, OpToken::binary, 0, 0, (OpToken *)0 };
+@@ -260,6 +263,17 @@
+   }
+ }
+ 
++void PrintC::pushTypeQualifiers(uint4 qualifiers)
++
++{
++  if (qualifiers == Datatype::qualifier_const)
++    pushOp(&const_expr,(const PcodeOp *)0);
++  else if (qualifiers == Datatype::qualifier_volatile)
++    pushOp(&volatile_expr,(const PcodeOp *)0);
++  else if (qualifiers != 0)
++    pushOp(&const_volatile_expr,(const PcodeOp *)0);
++}
++
+ /// Push the default '*' operator, allowing front-ends to specialize individual pointer layers.
+ /// \param ct is the pointer data-type being declared
+ void PrintC::pushPointerType(const TypePointer *ct)
+@@ -287,20 +301,28 @@
+   else
+     tok = &type_expr_space;
+ 
++  string qualifierPrefix;
++  uint4 qualifiers = ct->getDeclarationQualifiers();
++  if ((qualifiers & Datatype::qualifier_const) != 0)
++    qualifierPrefix += "const ";
++  if ((qualifiers & Datatype::qualifier_volatile) != 0)
++    qualifierPrefix += "volatile ";
+   if (ct->getName().size()==0) {	// Check for anonymous type
+     // We could support a struct or enum declaration here
+-    string nm = genericTypeName(ct);
++    string nm = qualifierPrefix + genericTypeName(ct);
+     pushOp(tok,(const PcodeOp *)0);
+     pushAtom(Atom(nm,typetoken,EmitMarkup::type_color,ct));
+   }
+   else {
+     pushOp(tok,(const PcodeOp *)0);
+-    pushAtom(Atom(ct->getDisplayName(),typetoken,EmitMarkup::type_color,ct));
++    pushAtom(Atom(qualifierPrefix + ct->getDisplayName(),typetoken,EmitMarkup::type_color,ct));
+   }
+   for(int4 i=typestack.size()-2;i>=0;--i) {
+     ct = typestack[i];
+-    if (ct->getMetatype() == TYPE_PTR)
++    if (ct->getMetatype() == TYPE_PTR) {
+       pushPointerType((const TypePointer *)ct);
++      pushTypeQualifiers(ct->getDeclarationQualifiers());
++    }
+     else if (ct->getMetatype() == TYPE_ARRAY)
+       pushOp(&array_expr,(const PcodeOp *)0);
+     else if (ct->getMetatype() == TYPE_CODE)
+diff --git a/src/decompiler/printc.hh b/src/decompiler/printc.hh
+--- a/src/decompiler/printc.hh
++++ b/src/decompiler/printc.hh
+@@ -113,6 +113,9 @@
+   static OpToken xorequal;		///< The \e in-place \e logical \e xor operator
+   static OpToken type_expr_space;	///< Type declaration involving a space (identifier or adornment)
+   static OpToken type_expr_nospace;	///< Type declaration with no space
++  static OpToken const_expr;
++  static OpToken volatile_expr;
++  static OpToken const_volatile_expr;
+   static OpToken ptr_expr;		///< Pointer adornment for a type declaration
+   static OpToken array_expr;		///< Array adornment for a type declaration
+   static OpToken enum_cat;		///< The \e concatenation operator for enumerated values
+@@ -167,6 +170,7 @@
+   void pushPrototypeInputs(const FuncProto *proto);				///< Push input parameters
+   void pushSymbolScope(const Symbol *symbol);			///< Push tokens resolving a symbol's scope
+   void emitSymbolScope(const Symbol *symbol);			///< Emit tokens resolving a symbol's scope
++  void pushTypeQualifiers(uint4 qualifiers);	///< Emit qualifiers at the current declarator position
+   virtual void pushPointerType(const TypePointer *ct);		///< Push the operator for one pointer layer of a declaration
+   virtual void pushTypeStart(const Datatype *ct,bool noident);	///< Push part of a data-type declaration onto the RPN stack, up to the identifier
+   virtual void pushTypeEnd(const Datatype *ct);			///< Push the tail ends of a data-type declaration onto the RPN stack
+diff --git a/src/decompiler/type.cc b/src/decompiler/type.cc
+--- a/src/decompiler/type.cc
++++ b/src/decompiler/type.cc
+@@ -135,6 +135,7 @@
+   submeta = base2sub[m];
+   flags = 0;
+   id = 0;
++  qualifiedBase = (Datatype *)0;
+   typedefImm = (Datatype *)0;
+   alignment = align;
+   alignSize = s;
+@@ -238,6 +239,7 @@
+ {
+   if (submeta != op.submeta) return (submeta < op.submeta) ? -1 : 1;
+   if (size != op.size) return (op.size - size);
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return 0;
+ }
+ 
+@@ -253,6 +255,7 @@
+ {
+   if (submeta != op.submeta) return (submeta < op.submeta) ? -1 : 1;
+   if (size != op.size) return (op.size-size);
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return 0;
+ }
+ 
+@@ -462,6 +465,11 @@
+ void Datatype::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
++  if (typedefImm != (Datatype *)0) {
++    encodeTypedef(encoder);
++    return;
++  }
+   encoder.openElement(ELEM_TYPE);
+   encodeBasic(metatype,-1,encoder);
+   encoder.closeElement(ELEM_TYPE);
+@@ -503,6 +511,7 @@
+ void Datatype::encodeRef(Encoder &encoder) const
+ 
+ {				// Save just a name reference if possible
++  if (encodeQualified(encoder)) return;
+   if ((id!=0)&&(metatype != TYPE_VOID)) {
+     encoder.openElement(ELEM_TYPEREF);
+     encoder.writeString(ATTRIB_NAME,name);
+@@ -517,6 +526,18 @@
+   }
+   else
+     encode(encoder);
++}
++
++/// Encode qualifications as a reference to their canonical owner, not a second definition.
++bool Datatype::encodeQualified(Encoder &encoder) const
++
++{
++  if (qualifiedBase == (Datatype *)0) return false;
++  encoder.openElement(ELEM_QUALIFIED_TYPE);
++  encoder.writeUnsignedInteger(ATTRIB_QUALIFIERS,getDeclarationQualifiers());
++  qualifiedBase->encodeRef(encoder);
++  encoder.closeElement(ELEM_QUALIFIED_TYPE);
++  return true;
+ }
+ 
+ /// If \b this has no component data-types, return \b true.
+@@ -983,6 +1004,7 @@
+ void TypeChar::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -1030,6 +1052,7 @@
+ void TypeUnicode::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -1060,6 +1083,7 @@
+ void TypeVoid::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -1124,12 +1148,14 @@
+     if (tp->spaceid == (AddrSpace *)0) return -1;
+     return (spaceid->getIndex() < tp->spaceid->getIndex()) ? -1 : 1;
+   }
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return (op.getSize()-size);
+ }
+ 
+ void TypePointer::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -1415,6 +1441,7 @@
+   if (submeta != op.getSubMeta()) return (submeta < op.getSubMeta()) ? -1 : 1;
+   TypeArray *ta = (TypeArray *) &op;	// Both must be arrays
+   if (arrayof != ta->arrayof) return (arrayof < ta->arrayof) ? -1 : 1;	// Compare absolute pointers
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return (op.getSize()-size);
+ }
+ 
+@@ -1476,6 +1503,7 @@
+ void TypeArray::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -1654,6 +1682,7 @@
+ void TypeEnum::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -2100,6 +2129,7 @@
+ void TypeStruct::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -2560,6 +2590,7 @@
+ void TypeUnion::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -2770,12 +2801,14 @@
+   TypePartialEnum *tp = (TypePartialEnum *) &op;	// Both must be partial
+   if (parent != tp->parent) return (parent < tp->parent) ? -1 : 1;	// Compare absolute pointers
+   if (offset != tp->offset) return (offset < tp->offset) ? -1 : 1;
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return (op.getSize()-size);
+ }
+ 
+ void TypePartialEnum::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   encoder.openElement(ELEM_TYPE);
+   encodeBasic(TYPE_PARTIALENUM,-1,encoder);
+   encoder.writeSignedInteger(ATTRIB_OFFSET, offset);
+@@ -2884,6 +2917,7 @@
+   TypePartialStruct *tp = (TypePartialStruct *) &op;	// Both must be partial
+   if (container != tp->container) return (container < tp->container) ? -1 : 1;	// Compare absolute pointers
+   if (offset != tp->offset) return (offset < tp->offset) ? -1 : 1;
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return (op.getSize()-size);
+ }
+ 
+@@ -2957,12 +2991,14 @@
+   TypePartialUnion *tp = (TypePartialUnion *) &op;	// Both must be partial unions
+   if (container != tp->container) return (container < tp->container) ? -1 : 1;	// Compare absolute pointers
+   if (offset != tp->offset) return (offset < tp->offset) ? -1 : 1;
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return (op.getSize()-size);
+ }
+ 
+ void TypePartialUnion::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   encoder.openElement(ELEM_TYPE);
+   encodeBasic(metatype,-1,encoder);
+   encoder.writeSignedInteger(ATTRIB_OFFSET, offset);
+@@ -3134,12 +3170,14 @@
+   if (parent != tp->parent) return (parent < tp->parent) ? -1 : 1;
+ 
+   if (wordsize != tp->wordsize) return (wordsize < tp->wordsize) ? -1 : 1;
++  if (getQualifiers() != op.getQualifiers()) return getQualifiers() > op.getQualifiers() ? -1 : 1;
+   return (op.getSize()-size);
+ }
+ 
+ void TypePointerRel::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   encoder.openElement(ELEM_TYPE);
+   encodeBasic(TYPE_PTRREL,-1,encoder);	// Override the metatype for XML
+   if (wordsize != 1)
+@@ -3387,6 +3425,7 @@
+ void TypeCode::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -3567,6 +3606,7 @@
+ void TypeSpacebase::encode(Encoder &encoder) const
+ 
+ {
++  if (encodeQualified(encoder)) return;
+   if (typedefImm != (Datatype *)0) {
+     encodeTypedef(encoder);
+     return;
+@@ -3600,6 +3640,7 @@
+ TypeFactory::TypeFactory(Architecture *g)
+ 
+ {
++  resolvingIncomplete = false;
+   glb = g;
+   sizeOfShort = 0;
+   sizeOfInt = 0;
+@@ -3866,6 +3907,9 @@
+     ct.id = 0;
+     iter = nametree.lower_bound((Datatype *)&ct);
+     if (iter == nametree.end()) return (Datatype *)0; // Didn't find it
++    while(iter != nametree.end() && (*iter)->getName() == n && (*iter)->qualifiedBase != (Datatype *)0)
++      ++iter;
++    if (iter == nametree.end()) return (Datatype *)0;
+     if ((*iter)->getName() != n) return (Datatype *)0; // Found at least one datatype with this name
+   }
+   return *iter;
+@@ -4020,6 +4064,7 @@
+   tree.insert(ot);
+   recalcPointerSubmeta(ot, SUB_PTR);
+   recalcPointerSubmeta(ot, SUB_PTR_STRUCT);
++  resolveIncompleteTypedefs();
+ }
+ 
+ /// This method should only be used on an incomplete union. It will mark the union as complete.
+@@ -4039,6 +4084,7 @@
+   ot->flags &= ~(uint4)Datatype::type_incomplete;
+   ot->flags |= (flags & (Datatype::variable_length | Datatype::type_incomplete));
+   tree.insert(ot);
++  resolveIncompleteTypedefs();
+ }
+ 
+ /// The given prototype is copied into the given code data-type
+@@ -4056,6 +4102,7 @@
+   newCode->flags &= ~(uint4)Datatype::type_incomplete;
+   newCode->flags |= (flags & (Datatype::variable_length | Datatype::type_incomplete));
+   tree.insert(newCode);
++  resolveIncompleteTypedefs();
+ }
+ 
+ /// \param nmap is the mapping from integer value to name string
+@@ -4079,6 +4126,8 @@
+ {				// Make sure dependants of ct are in order, then add ct
+   pair<DatatypeSet::iterator,bool> res = mark.insert(ct);
+   if (!res.second) return;	// Already inserted before
++  if (ct->qualifiedBase != (Datatype *)0)
++    orderRecurse(deporder,mark,ct->qualifiedBase);
+   if (ct->typedefImm != (Datatype *)0)
+     orderRecurse(deporder,mark,ct->typedefImm);
+   int4 size = ct->numDepend();
+@@ -4296,36 +4345,76 @@
+ void TypeFactory::resolveIncompleteTypedefs(void)
+ 
+ {
+-  list<Datatype *>::iterator iter = incompleteTypedef.begin();
+-  while(iter != incompleteTypedef.end()) {
+-    Datatype *dt = *iter;
+-    Datatype *defedType = dt->getTypedef();
+-    if (!defedType->isIncomplete()) {
+-      if (dt->getMetatype() == TYPE_STRUCT) {
+-  	TypeStruct *prevStruct = (TypeStruct *)dt;
+-  	TypeStruct *defedStruct = (TypeStruct *)defedType;
+-  	setFields(defedStruct->field,defedStruct->bitfield,prevStruct,defedStruct->size,defedStruct->alignment,
+-		  defedStruct->flags);
+-  	iter = incompleteTypedef.erase(iter);
+-      }
+-      else if (dt->getMetatype() == TYPE_UNION) {
+-  	TypeUnion *prevUnion = (TypeUnion *)dt;
+-  	TypeUnion *defedUnion = (TypeUnion *)defedType;
+-  	setFields(defedUnion->field,prevUnion,defedUnion->size,defedUnion->alignment,defedUnion->flags);
+-  	iter = incompleteTypedef.erase(iter);
+-      }
+-      else if (dt->getMetatype() == TYPE_CODE) {
+-	TypeCode *prevCode = (TypeCode *)dt;
+-	TypeCode *defedCode = (TypeCode *)defedType;
+-	setPrototype(defedCode->proto, prevCode, defedCode->flags);
+-	iter = incompleteTypedef.erase(iter);
++  if (resolvingIncomplete) return;
++  resolvingIncomplete = true;
++  try {
++    list<Datatype *>::iterator iter = incompleteTypedef.begin();
++    while(iter != incompleteTypedef.end()) {
++      Datatype *dt = *iter;
++      Datatype *defedType = dt->qualifiedBase != (Datatype *)0 ? dt->qualifiedBase : dt->getTypedef();
++      if (!defedType->isIncomplete()) {
++        if (dt->getMetatype() == TYPE_STRUCT) {
++          TypeStruct *prevStruct = (TypeStruct *)dt;
++          TypeStruct *defedStruct = (TypeStruct *)defedType;
++          setFields(defedStruct->field,defedStruct->bitfield,prevStruct,defedStruct->size,defedStruct->alignment,defedStruct->flags);
++          iter = incompleteTypedef.erase(iter);
++        }
++        else if (dt->getMetatype() == TYPE_UNION) {
++          TypeUnion *prevUnion = (TypeUnion *)dt;
++          TypeUnion *defedUnion = (TypeUnion *)defedType;
++          setFields(defedUnion->field,prevUnion,defedUnion->size,defedUnion->alignment,defedUnion->flags);
++          iter = incompleteTypedef.erase(iter);
++        }
++        else if (dt->getMetatype() == TYPE_CODE) {
++          TypeCode *prevCode = (TypeCode *)dt;
++          TypeCode *defedCode = (TypeCode *)defedType;
++          setPrototype(defedCode->proto,prevCode,defedCode->flags);
++          iter = incompleteTypedef.erase(iter);
++        }
++        else
++          ++iter;
+       }
+       else
+-	++iter;
+-    }
+-    else
+-      ++iter;
+-  }
++        ++iter;
++    }
++  }
++  catch(...) {
++    resolvingIncomplete = false;
++    throw;
++  }
++  resolvingIncomplete = false;
++}
++
++/// Add qualifiers at one declaration layer, preserving the concrete class and canonical owner.
++Datatype *TypeFactory::getQualifiedType(Datatype *ct,uint4 qualifiers)
++
++{
++  if ((qualifiers & ~((uint4)Datatype::qualifier_mask)) != 0)
++    throw LowlevelError("Unsupported data-type qualifiers");
++  if (qualifiers != 0 && ct->getMetatype() == TYPE_CODE)
++    throw LowlevelError("Function types cannot be const or volatile");
++  qualifiers |= ct->getQualifiers();
++  if (qualifiers == ct->getQualifiers()) return ct;
++  Datatype *base = ct->getUnqualified();
++  Datatype *element = (Datatype *)0;
++  if (base->getMetatype() == TYPE_ARRAY)
++    element = getQualifiedType(((TypeArray *)base)->arrayof,qualifiers);
++  Datatype *candidate = base->clone();
++  candidate->flags = (candidate->flags & ~(uint4)(Datatype::coretype | Datatype::qualifier_mask)) | qualifiers;
++  candidate->qualifiedBase = base;
++  if (base->id != 0)
++    candidate->id = Datatype::hashSize(base->id,qualifiers);
++  if (element != (Datatype *)0)
++    ((TypeArray *)candidate)->arrayof = element;
++  Datatype *res = findNoName(*candidate);
++  if (res != (Datatype *)0) {
++    delete candidate;
++    return res;
++  }
++  insert(candidate);
++  if (candidate->isIncomplete())
++    incompleteTypedef.push_back(candidate);
++  return candidate;
+ }
+ 
+ /// Find or create a data-type identical to the given data-type except for its name and id.
+@@ -4351,6 +4440,7 @@
+   res->displayName = name;
+   res->id = id;			// and new id
+   res->flags &= ~((uint4)Datatype::coretype);	// Not a core type
++  res->qualifiedBase = (Datatype *)0;
+   res->typedefImm = ct;
+   res->setDisplayFormat(format);
+   insert(res);
+@@ -4370,7 +4460,7 @@
+ 
+ {
+   if (pt->hasStripped())
+-    pt = pt->getStripped();
++    pt = getQualifiedType(pt->getStripped(),pt->getQualifiers());
+   if (pt->getMetatype() == TYPE_ARRAY)
+     pt = ((TypeArray *)pt)->getBase();		// Strip the first ARRAY type
+   TypePointer tmp(s,pt,ws);
+@@ -4388,7 +4478,7 @@
+ 
+ {
+   if (pt->hasStripped())
+-    pt = pt->getStripped();
++    pt = getQualifiedType(pt->getStripped(),pt->getQualifiers());
+   TypePointer tmp(s,pt,ws);
+   TypePointer *res = (TypePointer *) findAdd(tmp);
+   res->calcTruncate(*this);
+@@ -4406,7 +4496,7 @@
+ 
+ {
+   if (pt->hasStripped())
+-    pt = pt->getStripped();
++    pt = getQualifiedType(pt->getStripped(),pt->getQualifiers());
+   TypePointer tmp(s,pt,ws);
+   tmp.name = n;
+   tmp.displayName = n;
+@@ -4423,7 +4513,7 @@
+ 
+ {
+   if (ao->hasStripped())
+-    ao = ao->getStripped();
++    ao = getQualifiedType(ao->getStripped(),ao->getQualifiers());
+   TypeArray tmp(as,ao);
+   return (TypeArray *) findAdd(tmp);
+ }
+@@ -4593,9 +4683,9 @@
+ {
+   Datatype *pt = ptr->ptrto;
+   if (pt->hasStripped())
+-    pt = pt->getStripped();
++    pt = getQualifiedType(pt->getStripped(),pt->getQualifiers());
+   TypePointer tmp(newSize,pt,ptr->wordsize);
+-  return (TypePointer *) findAdd(tmp);
++  return (TypePointer *)getQualifiedType(findAdd(tmp),ptr->getQualifiers());
+ }
+ 
+ /// \param ct is the integer data-type
+@@ -4609,8 +4699,8 @@
+   if (meta != TYPE_INT && meta != TYPE_UINT)
+     meta = TYPE_UINT;
+   if (ct->isCharPrint())
+-    return getBase(newSize, meta);
+-  return getBaseNoChar(newSize, meta);
++    return getQualifiedType(getBase(newSize, meta),ct->getQualifiers());
++  return getQualifiedType(getBaseNoChar(newSize, meta),ct->getQualifiers());
+ }
+ 
+ /// Drill down into nested data-types until we get to a data-type that exactly matches the
+@@ -4791,6 +4881,7 @@
+   dependentOrder(deporder);	// Put types in correct order
+   encoder.openElement(ELEM_TYPEGRP);
+   for(iter=deporder.begin();iter!=deporder.end();++iter) {
++    if ((*iter)->qualifiedBase != (Datatype *)0) continue;	// Qualified variants are references, not definitions
+     if ((*iter)->getName().size()==0) continue;	// Don't save anonymous types
+     if ((*iter)->isCoreType()) { // If this would be saved as a coretype
+       type_metatype meta = (*iter)->getMetatype();
+@@ -5017,6 +5108,12 @@
+   Datatype *ct;
+ 
+   uint4 elemId = decoder.openElement();
++  if (elemId == ELEM_QUALIFIED_TYPE) {
++    uint4 qualifiers = decoder.readUnsignedInteger(ATTRIB_QUALIFIERS);
++    ct = getQualifiedType(decodeType(decoder),qualifiers);
++    decoder.closeElement(elemId);
++    return ct;
++  }
+   if (elemId == ELEM_VOID) {
+     ct = getTypeVoid();	// Automatically a coretype
+     decoder.closeElement(elemId);
+diff --git a/src/decompiler/type.hh b/src/decompiler/type.hh
+--- a/src/decompiler/type.hh
++++ b/src/decompiler/type.hh
+@@ -196,11 +196,13 @@
+   string displayName;		///< Name to display in output
+   type_metatype metatype;	///< Meta-type - type disregarding size
+   sub_metatype submeta;		///< Sub-type of the meta-type, for comparisons
++  Datatype *qualifiedBase;	///< Canonical type before qualifiers were applied at this layer
+   Datatype *typedefImm;		///< The immediate data-type being typedefed by \e this
+   int4 alignment;		///< Byte alignment expected for \b this data-type in addressable memory
+   int4 alignSize;		///< Size of data-type rounded up to a multiple of \b alignment
+   void decodeBasic(Decoder &decoder);	///< Recover basic data-type properties
+   void encodeBasic(type_metatype meta,int4 align,Encoder &encoder) const;	///< Encode basic data-type properties
++  bool encodeQualified(Encoder &encoder) const;	///< Encode a qualified reference without redefining its owner
+   void encodeTypedef(Encoder &encoder) const;	///< Encode \b this as a \e typedef element to a stream
+   void markComplete(void) { flags &= ~(uint4)type_incomplete; }		///< Mark \b this data-type as completely defined
+   void setDisplayFormat(uint4 format);		///< Set a specific display format
+@@ -212,9 +214,19 @@
+   virtual Datatype *clone(void) const=0;	///< Clone the data-type
+   /// \brief Construct the base data-type copying low-level properties of another
+   Datatype(const Datatype &op) { size = op.size; name=op.name; displayName=op.displayName; metatype=op.metatype;
+-    submeta=op.submeta; flags=op.flags; id=op.id; typedefImm=op.typedefImm; alignment=op.alignment; alignSize=op.alignSize; }
++    submeta=op.submeta; flags=op.flags; id=op.id; qualifiedBase=op.qualifiedBase; typedefImm=op.typedefImm; alignment=op.alignment; alignSize=op.alignSize; }
+   Datatype(int4 s,int4 align,type_metatype m);		///< Constructor
+   virtual ~Datatype(void) {}	///< Destructor
++  enum Qualifier {
++    qualifier_const = 0x80000,
++    qualifier_volatile = 0x100000,
++    qualifier_mask = qualifier_const | qualifier_volatile
++  };
++  uint4 getQualifiers(void) const { return flags & qualifier_mask; } ///< Semantic qualifiers at this layer
++  bool isConst(void) const { return (flags & qualifier_const) != 0; }
++  bool isVolatile(void) const { return (flags & qualifier_volatile) != 0; }
++  Datatype *getUnqualified(void) const { return qualifiedBase == (Datatype *)0 ? const_cast<Datatype *>(this) : qualifiedBase; }
++  uint4 getDeclarationQualifiers(void) const { return qualifiedBase == (Datatype *)0 ? 0 : getQualifiers() & ~qualifiedBase->getQualifiers(); }
+   bool isCoreType(void) const { return ((flags&coretype)!=0); }	///< Is this a core data-type
+   bool isCharPrint(void) const { return ((flags&(chartype|utf16|utf32|opaque_string))!=0); }	///< Does this print as a 'char'
+   bool isEnumType(void) const { return ((flags&enumtype)!=0); }		///< Is this an enumerated type
+@@ -360,6 +372,7 @@
+   bool operator()(const Datatype *a,const Datatype *b) const {
+     int4 res = a->compareDependency(*b);
+     if (res != 0) return (res<0);
++    if (a->qualifiedBase != b->qualifiedBase) return std::less<Datatype *>()(a->qualifiedBase,b->qualifiedBase);
+     return a->getId() < b->getId(); }
+ };
+ 
+@@ -845,6 +858,7 @@
+   Datatype *type_nochar;	///< Same dimensions as char but acts and displays as an INT
+   Datatype *charcache[5];	///< Cached character data-types
+   map<Datatype *,string> warnings;	///< Warnings for the user about data-types in \b this factory.
++  bool resolvingIncomplete;	///< Prevent re-entry during dependent completion
+   list<Datatype *> incompleteTypedef;	///< Incomplete data-types defined as a \e typedef
+   Datatype *findNoName(Datatype &ct);	///< Find data-type (in this container) by function
+   void insert(Datatype *newtype);	///< Insert pointer into the cross-reference sets
+@@ -918,6 +932,7 @@
+   TypePartialEnum *getTypePartialEnum(TypeEnum *contain,int4 off,int4 sz);	///< Create a partial enumeration
+   TypeSpacebase *getTypeSpacebase(AddrSpace *id,const Address &addr);	///< Create a "spacebase" type
+   TypeCode *getTypeCode(const PrototypePieces &proto);			///< Create a "function" datatype
++  Datatype *getQualifiedType(Datatype *ct,uint4 qualifiers);	///< Add const/volatile without changing the canonical concrete type
+   Datatype *getTypedef(Datatype *ct,const string &name,uint8 id,uint4 format);	///< Create a new \e typedef data-type
+   TypePointerRel *getTypePointerRel(TypePointer *parentPtr,Datatype *ptrTo,int4 off);	///< Get pointer offset relative to a container
+   TypePointerRel *getTypePointerRel(int4 sz,Datatype *parent,Datatype *ptrTo,int4 ws,int4 off,const string &nm);
+diff --git a/src/unittests/testqualifiers.cc b/src/unittests/testqualifiers.cc
+new file mode 100644
+--- /dev/null
++++ b/src/unittests/testqualifiers.cc
+@@ -0,0 +1,262 @@
++#include "architecture.hh"
++#include "libdecomp.hh"
++#include "printc.hh"
++#include "test.hh"
++
++namespace ghidra {
++
++class QualifiedTypeEnvironment {
++public:
++  Architecture *arch;
++  QualifiedTypeEnvironment(void) {
++    startDecompilerLibrary(getenv("SLEIGHHOME"));
++    istringstream input("<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x1000\" readonly=\"true\">cb</bytechunk></binaryimage>");
++    DocumentStorage store;
++    Document *document = store.parseDocument(input);
++    store.registerTag(document->getRoot());
++    arch = ArchitectureCapability::getCapability("xml")->buildArchitecture("","",&cout);
++    arch->init(store);
++  }
++  ~QualifiedTypeEnvironment(void) { delete arch; }
++};
++
++class QualifiedDeclarationPrinter : public PrintC {
++public:
++  QualifiedDeclarationPrinter(Architecture *arch) : PrintC(arch) { initializeFromArchitecture(); }
++  string declaration(const Datatype *type,bool abstract = false) {
++    ostringstream output;
++    clear();
++    setOutputStream(&output);
++    pushTypeStart(type,abstract);
++    pushAtom(Atom(abstract ? "" : "value",syntax,EmitMarkup::no_color));
++    pushTypeEnd(type);
++    recurse();
++    emit->flush();
++    setOutputStream((ostream *)0);
++    return output.str();
++  }
++};
++
++TEST(qualified_type_identity) {
++  QualifiedTypeEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT,"word");
++  uint8 id = word->getId();
++  Datatype *constant = factory->getQualifiedType(word,Datatype::qualifier_const);
++  Datatype *vol = factory->getQualifiedType(word,Datatype::qualifier_volatile);
++  Datatype *both = factory->getQualifiedType(constant,Datatype::qualifier_volatile);
++  ASSERT_NOT_EQUALS(constant,word);
++  ASSERT_NOT_EQUALS(constant,vol);
++  ASSERT_NOT_EQUALS(constant->getId(),id);
++  ASSERT_NOT_EQUALS(vol->getId(),id);
++  ASSERT_EQUALS(word->getId(),id);
++  ASSERT_EQUALS(word->getQualifiers(),0);
++  ASSERT_EQUALS(factory->findByName("word"),word);
++  ASSERT_EQUALS(factory->getQualifiedType(word,Datatype::qualifier_const),constant);
++  ASSERT_EQUALS(factory->getQualifiedType(vol,Datatype::qualifier_const),both);
++  ASSERT_EQUALS(both->getUnqualified(),word);
++  ASSERT_EQUALS(both->getQualifiers(),(uint4)Datatype::qualifier_mask);
++  ASSERT_EQUALS(factory->resizeInteger(constant,4)->getQualifiers(),constant->getQualifiers());
++  TypeEnum *enumeration = factory->getTypeEnum("Mode");
++  factory->setEnumValues({{1,"enabled"}},enumeration);
++  TypeEnum *qualifiedEnum = (TypeEnum *)factory->getQualifiedType(enumeration,Datatype::qualifier_const);
++  ASSERT(qualifiedEnum->isEnumType());
++  ASSERT(qualifiedEnum->hasNamedValue(1));
++  ASSERT_EQUALS(qualifiedEnum->getUnqualified(),enumeration);
++  Datatype *character = factory->getTypeChar(1);
++  Datatype *qualifiedChar = factory->getQualifiedType(character,Datatype::qualifier_const);
++  ASSERT(qualifiedChar->isASCII());
++  ASSERT_EQUALS(qualifiedChar->getSubMeta(),character->getSubMeta());
++  ASSERT_NOT_EQUALS(constant->compareDependency(*word),0);
++  ASSERT_NOT_EQUALS(constant->compare(*word,10),0);
++  TypePointer *plainPointer = factory->getTypePointer(2,word,1);
++  TypePointer *pointee = factory->getTypePointer(2,vol,1);
++  TypePointer *pointer = (TypePointer *)factory->getQualifiedType(plainPointer,Datatype::qualifier_volatile);
++  ASSERT_EQUALS(pointer->getMetatype(),TYPE_PTR);
++  ASSERT_EQUALS(pointer->getPtrTo(),word);
++  ASSERT_EQUALS(factory->resizePointer(pointer,4)->getQualifiers(),pointer->getQualifiers());
++  ASSERT_EQUALS(pointee->getPtrTo(),vol);
++  ASSERT_NOT_EQUALS(pointer,pointee);
++  ASSERT_NOT_EQUALS(pointer->compareDependency(*plainPointer),0);
++  ASSERT_EQUALS(factory->getTypePointer(2,word,1),plainPointer);
++  Datatype *alias = factory->getTypedef(constant,"ConstWord",0,0);
++  ASSERT(alias->isConst());
++  ASSERT_EQUALS(alias->getTypedef(),constant);
++  ASSERT_EQUALS(alias->getUnqualified(),alias);
++  ASSERT_EQUALS(factory->getQualifiedType(alias,Datatype::qualifier_const),alias);
++  Datatype *volatileAlias = factory->getQualifiedType(alias,Datatype::qualifier_volatile);
++  ASSERT(volatileAlias->isConst());
++  ASSERT(volatileAlias->isVolatile());
++  ASSERT_EQUALS(volatileAlias->getUnqualified(),alias);
++}
++
++TEST(qualified_type_declarators) {
++  QualifiedTypeEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT,"word");
++  Datatype *constant = factory->getQualifiedType(word,Datatype::qualifier_const);
++  Datatype *vol = factory->getQualifiedType(word,Datatype::qualifier_volatile);
++  TypePointer *plainPointer = factory->getTypePointer(2,word,1);
++  Datatype *constPointer = factory->getQualifiedType(plainPointer,Datatype::qualifier_const);
++  Datatype *pointer = factory->getQualifiedType(factory->getTypePointer(2,vol,1),Datatype::qualifier_const);
++  QualifiedDeclarationPrinter printer(env.arch);
++  ASSERT_EQUALS(printer.declaration(word),"word value");
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,factory->getQualifiedType(factory->getTypeVoid(),Datatype::qualifier_const),1)),"const void *value");
++  ASSERT_EQUALS(printer.declaration(constant),"const word value");
++  ASSERT_EQUALS(printer.declaration(vol),"volatile word value");
++  ASSERT_EQUALS(printer.declaration(pointer),"volatile word *const value");
++  ASSERT_EQUALS(printer.declaration(pointer,true),"volatile word *const ");
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,constPointer,1)),"word *const *value");
++  ASSERT_EQUALS(printer.declaration(factory->getTypeArray(3,constPointer)),"word *const value [3]");
++  Datatype *array = factory->getQualifiedType(factory->getTypeArray(3,word),Datatype::qualifier_const);
++  ASSERT_EQUALS(((TypeArray *)array)->getBase(),constant);
++  ASSERT_EQUALS(printer.declaration(array),"const word value [3]");
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,array,1)),"const word (*value) [3]");
++  Datatype *alias = factory->getTypedef(constant,"ConstWord",0,0);
++  ASSERT_EQUALS(printer.declaration(alias),"ConstWord value");
++  ASSERT_EQUALS(printer.declaration(factory->getQualifiedType(alias,Datatype::qualifier_volatile)),"volatile ConstWord value");
++  Datatype *pointerAlias = factory->getTypedef(plainPointer,"WordPointer",0,0);
++  ASSERT_EQUALS(printer.declaration(factory->getQualifiedType(pointerAlias,Datatype::qualifier_const)),"const WordPointer value");
++  PrototypePieces signature;
++  signature.model = env.arch->defaultfp;
++  signature.outtype = constant;
++  signature.intypes.push_back(factory->getTypePointer(2,vol,1));
++  signature.innames.push_back("input");
++  signature.firstVarArgSlot = -1;
++  TypeCode *code = factory->getTypeCode(signature);
++  TypePointer *callback = factory->getTypePointer(2,code,1);
++  Datatype *constCallback = factory->getQualifiedType(callback,Datatype::qualifier_const);
++  ASSERT_EQUALS(((TypePointer *)constCallback)->getPtrTo(),code);
++  ASSERT_EQUALS(printer.declaration(constCallback),"const word (*const value)(volatile word *)");
++  ASSERT_EQUALS(printer.declaration(factory->getQualifiedType(factory->getTypeStruct("Record"),Datatype::qualifier_mask)),"const volatile Record value");
++}
++
++template<typename Encode,typename Decode> static void qualifiedCodecRoundTrip(void) {
++  QualifiedTypeEnvironment source;
++  TypeFactory *factory = source.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT,"word");
++  Datatype *vol = factory->getQualifiedType(word,Datatype::qualifier_volatile);
++  Datatype *alias = factory->getTypedef(vol,"VolatileWord",0,0);
++  Datatype *qualifiedAlias = factory->getQualifiedType(alias,Datatype::qualifier_const);
++  Datatype *pointer = factory->getQualifiedType(factory->getTypePointer(2,qualifiedAlias,1),Datatype::qualifier_volatile);
++  TypeStruct *record = factory->getTypeStruct("Record");
++  Datatype *qualifiedRecord = factory->getQualifiedType(record,Datatype::qualifier_const);
++  vector<TypeField> fields;
++  fields.push_back(TypeField(0,0,"next",factory->getTypePointer(2,qualifiedRecord,1)));
++  factory->setFields(fields,{},record,2,2,0);
++  PrototypePieces signature;
++  signature.model = source.arch->defaultfp;
++  signature.outtype = qualifiedAlias;
++  signature.intypes.push_back(pointer);
++  signature.innames.push_back("input");
++  signature.firstVarArgSlot = -1;
++  TypeCode *code = factory->getTypeCode(signature);
++  Datatype *callback = factory->getQualifiedType(factory->getTypePointer(2,code,1),Datatype::qualifier_const);
++  vector<Datatype *> cases = {vol,alias,qualifiedAlias,pointer,qualifiedRecord,factory->getQualifiedType(factory->getTypeArray(3,word),Datatype::qualifier_const),callback};
++  ostringstream output;
++  Encode encoder(output);
++  encoder.openElement(ELEM_TYPEGRP);
++  word->encode(encoder);
++  alias->encode(encoder);
++  record->encode(encoder);
++  for(Datatype *type : cases) {
++    type->encode(encoder);
++    type->encodeRef(encoder);
++  }
++  encoder.closeElement(ELEM_TYPEGRP);
++  QualifiedTypeEnvironment restored;
++  TypeFactory *target = restored.arch->types;
++  istringstream input(output.str());
++  Decode decoder(restored.arch);
++  decoder.ingestStream(input);
++  uint4 element = decoder.openElement(ELEM_TYPEGRP);
++  Datatype *restoredWord = target->decodeType(decoder);
++  Datatype *restoredAlias = target->decodeType(decoder);
++  Datatype *restoredRecord = target->decodeType(decoder);
++  for(Datatype *type : cases) {
++    Datatype *actual = target->decodeType(decoder);
++    ASSERT_EQUALS(target->decodeType(decoder),actual);
++    ASSERT_EQUALS(actual->getMetatype(),type->getMetatype());
++    ASSERT_EQUALS(actual->getQualifiers(),type->getQualifiers());
++    ASSERT_EQUALS(actual->getName(),type->getName());
++    ASSERT_EQUALS(actual->getId(),type->getId());
++    ASSERT_EQUALS(actual->getSize(),type->getSize());
++    ASSERT_EQUALS(actual->isIncomplete(),false);
++    if (type == vol) ASSERT_EQUALS(actual->getUnqualified(),restoredWord);
++    if (type == alias) ASSERT_EQUALS(actual,restoredAlias);
++    if (type == qualifiedAlias) ASSERT_EQUALS(actual->getUnqualified(),restoredAlias);
++    if (type == qualifiedRecord) {
++      ASSERT_EQUALS(actual->getUnqualified(),restoredRecord);
++      ASSERT_EQUALS(actual->numDepend(),1);
++      ASSERT_EQUALS(((TypePointer *)actual->getDepend(0))->getPtrTo(),actual);
++    }
++    QualifiedDeclarationPrinter sourcePrinter(source.arch);
++    QualifiedDeclarationPrinter restoredPrinter(restored.arch);
++    ASSERT_EQUALS(restoredPrinter.declaration(actual),sourcePrinter.declaration(type));
++  }
++  ASSERT_EQUALS(restoredWord->getQualifiers(),0);
++  ASSERT_EQUALS(target->findByName("word"),restoredWord);
++  decoder.closeElement(element);
++  ostringstream saved;
++  Encode savedEncoder(saved);
++  savedEncoder.openElement(ELEM_DATA);
++  factory->encode(savedEncoder);
++  for(Datatype *type : cases)
++    type->encodeRef(savedEncoder);
++  savedEncoder.closeElement(ELEM_DATA);
++  QualifiedTypeEnvironment savedEnvironment;
++  istringstream savedInput(saved.str());
++  Decode savedDecoder(savedEnvironment.arch);
++  savedDecoder.ingestStream(savedInput);
++  uint4 dataElement = savedDecoder.openElement(ELEM_DATA);
++  TypeFactory *savedFactory = savedEnvironment.arch->types;
++  savedFactory->decode(savedDecoder);
++  for(Datatype *type : cases) {
++    Datatype *actual = savedFactory->decodeType(savedDecoder);
++    ASSERT_EQUALS(actual->getQualifiers(),type->getQualifiers());
++    ASSERT_EQUALS(actual->getName(),type->getName());
++    ASSERT_EQUALS(actual->getSize(),type->getSize());
++    ASSERT_EQUALS(actual->isIncomplete(),false);
++    QualifiedDeclarationPrinter originalPrinter(source.arch);
++    QualifiedDeclarationPrinter actualPrinter(savedEnvironment.arch);
++    ASSERT_EQUALS(actualPrinter.declaration(actual),originalPrinter.declaration(type));
++  }
++  savedDecoder.closeElement(dataElement);
++}
++
++TEST(qualified_type_xml_roundtrip) { qualifiedCodecRoundTrip<XmlEncode,XmlDecode>(); }
++TEST(qualified_type_packed_roundtrip) { qualifiedCodecRoundTrip<PackedEncode,PackedDecode>(); }
++
++TEST(qualified_type_incomplete_completion) {
++  QualifiedTypeEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getBase(2,TYPE_UINT,"word");
++  TypeStruct *record = factory->getTypeStruct("Record");
++  Datatype *qualified = factory->getQualifiedType(record,Datatype::qualifier_const);
++  Datatype *alias = factory->getTypedef(qualified,"RecordAlias",0,0);
++  Datatype *qualifiedAlias = factory->getQualifiedType(alias,Datatype::qualifier_volatile);
++  TypePointer *pointer = factory->getTypePointer(2,qualified,1);
++  ASSERT(qualified->isIncomplete());
++  ASSERT(alias->isIncomplete());
++  vector<TypeField> fields = {TypeField(0,0,"value",word)};
++  factory->setFields(fields,{},record,2,2,0);
++  for(Datatype *type : {qualified,alias,qualifiedAlias}) {
++    ASSERT_EQUALS(type->isIncomplete(),false);
++    ASSERT_EQUALS(type->getSize(),2);
++    ASSERT_EQUALS(type->numDepend(),1);
++    ASSERT_EQUALS(type->getDepend(0),word);
++  }
++  ASSERT_EQUALS(factory->getQualifiedType(record,Datatype::qualifier_const),qualified);
++  ASSERT_EQUALS(factory->getTypePointer(2,qualified,1),pointer);
++  ASSERT_EQUALS(pointer->getSubMeta(),factory->getTypePointer(2,record,1)->getSubMeta());
++  TypeUnion *un = factory->getTypeUnion("Choice");
++  Datatype *qualifiedUnion = factory->getQualifiedType(un,Datatype::qualifier_volatile);
++  Datatype *unionAlias = factory->getTypedef(qualifiedUnion,"ChoiceAlias",0,0);
++  factory->setFields(fields,un,2,2,0);
++  ASSERT_EQUALS(qualifiedUnion->isIncomplete(),false);
++  ASSERT_EQUALS(unionAlias->isIncomplete(),false);
++  ASSERT_EQUALS(qualifiedUnion->getDepend(0),word);
++  ASSERT_EQUALS(unionAlias->getDepend(0),word);
++}
++
++} // End namespace ghidra
