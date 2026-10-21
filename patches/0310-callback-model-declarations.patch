@@ -1,0 +1,169 @@
+diff --git a/src/decompiler/printc.hh b/src/decompiler/printc.hh
+--- a/src/decompiler/printc.hh
++++ b/src/decompiler/printc.hh
+@@ -166,6 +166,8 @@
+   virtual void emitOp(const ReversePolish &entry);
+   virtual void emitAtom(const Atom &atom);
+   void emitFunctionNameAndInputs(const Atom &atom);		///< Emit the contextual function-name operand
++  void emitPrototypeModel(const FuncProto *proto);		///< Emit the calling convention when selected for display
++  virtual bool expandTypeName(const Datatype *ct) const;		///< Decide whether a named declaration type should be expanded
+   void buildTypeStack(const Datatype *ct,vector<const Datatype *> &typestack);	///< Prepare to push components of a data-type declaration
+   void pushPrototypeInputs(const FuncProto *proto);				///< Push input parameters
+   void pushSymbolScope(const Symbol *symbol);			///< Push tokens resolving a symbol's scope
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -142,6 +142,13 @@
+   resetDefaultsPrintC();
+ }
+ 
++/// Preserve named types by default; front-ends can expand their non-typedef bindings.
++bool PrintC::expandTypeName(const Datatype *ct) const
++
++{
++  return false;
++}
++
+ /// Push nested components of a data-type declaration onto a stack, so we can access it bottom up
+ /// \param ct is the data-type being emitted
+ /// \param typestack will hold the sub-types involved in the displaying the declaration
+@@ -150,7 +157,7 @@
+ {
+   for(;;) {
+     typestack.push_back(ct);
+-    if (ct->getName().size() != 0)	// This can be a base type
++    if (ct->getName().size() != 0 && !expandTypeName(ct))	// This can be a base type
+       break;
+     if (ct->getMetatype()==TYPE_PTR)
+       ct = ((TypePointer *)ct)->getPtrTo();
+@@ -317,16 +324,29 @@
+     pushOp(tok,(const PcodeOp *)0);
+     pushAtom(Atom(qualifierPrefix + ct->getDisplayName(),typetoken,EmitMarkup::type_color,ct));
+   }
++  const FuncProto *pointerModel = (const FuncProto *)0;
+   for(int4 i=typestack.size()-2;i>=0;--i) {
+     ct = typestack[i];
+     if (ct->getMetatype() == TYPE_PTR) {
+       pushPointerType((const TypePointer *)ct);
++      if (pointerModel != (const FuncProto *)0) {
++	emitPrototypeModel(pointerModel);
++	pointerModel = (const FuncProto *)0;
++      }
+       pushTypeQualifiers(ct->getDeclarationQualifiers());
+     }
+     else if (ct->getMetatype() == TYPE_ARRAY)
+       pushOp(&array_expr,(const PcodeOp *)0);
+-    else if (ct->getMetatype() == TYPE_CODE)
++    else if (ct->getMetatype() == TYPE_CODE) {
+       pushOp(&function_call,(const PcodeOp *)0);
++      const FuncProto *proto = ((const TypeCode *)ct)->getPrototype();
++      if (proto != (const FuncProto *)0) {
++	if (i > 0 && typestack[i-1]->getMetatype() == TYPE_PTR)
++	  pointerModel = proto;
++	else
++	  emitPrototypeModel(proto);
++      }
++    }
+     else {
+       clear();
+       throw LowlevelError("Bad type expression");
+@@ -349,7 +369,7 @@
+   setMod(force_dec);
+   
+   for(;;) {
+-    if (ct->getName().size() != 0)	// This is the base type
++    if (ct->getName().size() != 0 && !expandTypeName(ct))	// This is the base type
+       break;
+     if (ct->getMetatype()==TYPE_PTR)
+       ct = ((const TypePointer *)ct)->getPtrTo();
+@@ -2753,19 +2773,23 @@
+     PrintLanguage::emitAtom(atom);
+ }
+ 
++void PrintC::emitPrototypeModel(const FuncProto *proto)
++
++{
++  if (option_convention && proto->printModelInDecl()) {
++    Emit::syntax_highlight highlight = proto->isModelUnknown() ? Emit::error_color : Emit::keyword_color;
++    emit->print(proto->getModelName(),highlight);
++    emit->spaces(1);
++  }
++}
++
+ void PrintC::emitFunctionNameAndInputs(const Atom &atom)
+ 
+ {
+   const Funcdata *fd = atom.ptr_second.fd;
+   const FuncProto *proto = &fd->getFuncProto();
+   emit->spaces(1);
+-  if (option_convention) {
+-    if (fd->getFuncProto().printModelInDecl()) {
+-      Emit::syntax_highlight highlight = fd->getFuncProto().isModelUnknown() ? Emit::error_color : Emit::keyword_color;
+-      emit->print(fd->getFuncProto().getModelName(),highlight);
+-      emit->spaces(1);
+-    }
+-  }
++  emitPrototypeModel(proto);
+   int4 id1 = emit->openGroup();
+   emitSymbolScope(fd->getSymbol());
+   PrintLanguage::emitAtom(atom);
+diff --git a/src/unittests/testidentity.cc b/src/unittests/testidentity.cc
+--- a/src/unittests/testidentity.cc
++++ b/src/unittests/testidentity.cc
+@@ -21,8 +21,12 @@
+ };
+ 
+ class IdentityPrinter : public PrintC {
++  const Datatype *expandedType = (const Datatype *)0;
++protected:
++  virtual bool expandTypeName(const Datatype *type) const { return type == expandedType; }
+ public:
+   IdentityPrinter(Architecture *arch) : PrintC(arch) { initializeFromArchitecture(); }
++  void expand(const Datatype *type) { expandedType = type; }
+   string declaration(const Datatype *type) {
+     ostringstream output;
+     clear();
+@@ -199,6 +203,43 @@
+   ASSERT_EQUALS(namedDefault->getPrototype()->getModelName(),"__cdecl16far");
+ }
+ 
++TEST(callback_model_declarations) {
++  IdentityEnvironment env;
++  IdentityTypes types(env.arch);
++  TypeFactory *factory = env.arch->types;
++  IdentityPrinter printer(env.arch);
++  printer.setMaxLineSize(200);
++  PrototypePieces signature;
++  signature.model = env.arch->getModel("__cdecl16far");
++  signature.outtype = types.word;
++  signature.intypes.push_back(factory->getTypePointer(2,types.cases[3],1));
++  signature.innames.push_back("input");
++  signature.firstVarArgSlot = -1;
++  TypeCode *anonymous = factory->getTypeCode(signature);
++  Datatype *pointer = factory->getTypePointer(4,anonymous,1);
++  ASSERT_EQUALS(printer.declaration(pointer),"IdentityWord (__cdecl16far *value)(const struct Alias *)");
++  ASSERT_EQUALS(printer.declaration(anonymous),"IdentityWord __cdecl16far value(const struct Alias *)");
++  Datatype *qualifiedPointer = factory->getQualifiedType(pointer,Datatype::qualifier_const);
++  Datatype *nestedPointer = factory->getQualifiedType(factory->getTypePointer(2,qualifiedPointer,1),Datatype::qualifier_volatile);
++  ASSERT_EQUALS(printer.declaration(nestedPointer),"IdentityWord (__cdecl16far *const *volatile value)(const struct Alias *)");
++  ASSERT_EQUALS(printer.declaration(factory->getTypeArray(2,pointer)),"IdentityWord (__cdecl16far *value [2])(const struct Alias *)");
++  printer.setConvention(false);
++  ASSERT_EQUALS(printer.declaration(pointer),"IdentityWord (*value)(const struct Alias *)");
++  printer.setConvention(true);
++  signature.model = env.arch->defaultfp;
++  ASSERT_EQUALS(signature.model->printInDecl(),false);
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,factory->getTypeCode(signature),1)),"IdentityWord (*value)(const struct Alias *)");
++  Datatype *namedPointer = factory->getTypePointer(4,types.callback,1);
++  ASSERT_EQUALS(printer.declaration(namedPointer),"Callback *value");
++  ASSERT_EQUALS(printer.declaration(types.callback),"Callback value");
++  printer.expand(types.callback);
++  ASSERT_EQUALS(printer.declaration(namedPointer),"IdentityWord (__cdecl16far *value)(const struct Alias *)");
++  ASSERT_EQUALS(printer.declaration(types.callback),"IdentityWord __cdecl16far value(const struct Alias *)");
++  ASSERT_EQUALS(printer.declaration(types.cases[15]),"CallbackAlias value");
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(4,types.cases[15],1)),"CallbackAlias *value");
++  ASSERT_EQUALS(printer.declaration(types.nearCallback),"Callback value");
++}
++
+ template<typename Encode,typename Decode> static void identityCodecRoundTrip(void) {
+   IdentityEnvironment source;
+   IdentityTypes types(source.arch);
