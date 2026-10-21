@@ -70,6 +70,8 @@ Native owner tests do not qualify every bridge consumer. Bridge Make, XPS Make/M
 `src/unittests/testsegmented.cc`
 : Patch-supplied segmented/native regressions, including entry-SS dependencies, full/empty guards and conservative finite/overlapping stack dependencies. The conditional flat32 cases decode machine instructions and inspect returned STORE dependencies; the finite 16-bit circular case uses generated p-code and the real range solver. The nonwrapping access-width cases inspect actual returned STORE dependencies. Boundary-wrap controls inspect guard byte coverage, not a safe function return across frame corruption. These bounded tests do not establish universal alias soundness or replace matching bridge production C/XML observations.
 
+The same test owner exercises hidden-return recovery with the x86-64 GCC model. The full action pipeline must retain the existing aggregate-return parameter even when it is unused, while recovering ordinary inputs without fixing the source parameter list. Fixed-input and direct no-types recovery controls cover the same native storage boundary. Meson supplies the matching x86 and x86-64 language fixtures; these native tests do not replace the bridge's host-specificity import checks.
+
 ## Manual Dalvik integration repro
 
 The Dalvik item of PR #26 is about `<pcode inject="uponentry"
