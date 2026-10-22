@@ -184,7 +184,7 @@ index 3f52319..702d7c2 100644
 +void PrintC::emitTypeModel(const FuncProto *proto)
 +
 +{
-+  if (proto->isModelDeclared()) {
++  if (option_convention && proto->isModelDeclared()) {
 +    Emit::syntax_highlight highlight = proto->isModelUnknown() ? Emit::error_color : Emit::keyword_color;
 +    emit->print(proto->getModelName(),highlight);
 +    emit->spaces(1);
@@ -259,8 +259,7 @@ index 4b96f32..5fa2099 100644
    ASSERT_EQUALS(printer.declaration(nestedPointer),"IdentityWord (__cdecl16far *const *volatile value)(const struct Alias *)");
    ASSERT_EQUALS(printer.declaration(factory->getTypeArray(2,pointer)),"IdentityWord (__cdecl16far *value [2])(const struct Alias *)");
    printer.setConvention(false);
--  ASSERT_EQUALS(printer.declaration(pointer),"IdentityWord (*value)(const struct Alias *)");
-+  ASSERT_EQUALS(printer.declaration(pointer),"IdentityWord (__cdecl16far *value)(const struct Alias *)");
+   ASSERT_EQUALS(printer.declaration(pointer),"IdentityWord (*value)(const struct Alias *)");
    printer.setConvention(true);
    signature.model = env.arch->defaultfp;
    ASSERT_EQUALS(signature.model->printInDecl(),false);
@@ -323,7 +322,7 @@ index 4b96f32..5fa2099 100644
 +class AttributeIdentityPrinter : public IdentityPrinter {
 +protected:
 +  virtual void emitTypeModel(const FuncProto *prototype) {
-+    if (!prototype->isModelDeclared()) return;
++    if (!option_convention || !prototype->isModelDeclared()) return;
 +    emit->print("__attribute__((r2_cc(\"" + prototype->getModelName() + "\")))",Emit::keyword_color);
 +    emit->spaces(1);
 +  }
@@ -340,7 +339,7 @@ index 4b96f32..5fa2099 100644
 +  TypeCode *declared = factory->getTypeCode(signature);
 +  AttributeIdentityPrinter printer(env.arch);
 +  printer.setMaxLineSize(200);
-+  printer.setConvention(false);
++  printer.setConvention(true);
 +  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,absent,1)),"PresenceWord (*value)(PresenceWord)");
 +  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,declared,1)),"PresenceWord (__attribute__((r2_cc(\"__stdcall16near\"))) *value)(PresenceWord)");
 +  ASSERT_EQUALS(printer.declaration(declared),"PresenceWord __attribute__((r2_cc(\"__stdcall16near\"))) value(PresenceWord)");
