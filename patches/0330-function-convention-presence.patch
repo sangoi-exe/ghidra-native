@@ -1,0 +1,433 @@
+diff --git a/src/decompiler/fspec.cc b/src/decompiler/fspec.cc
+index 7107e15..874646f 100644
+--- a/src/decompiler/fspec.cc
++++ b/src/decompiler/fspec.cc
+@@ -3830,6 +3830,7 @@ void FuncProto::setPieces(const PrototypePieces &pieces)
+ {
+   if (pieces.model != (ProtoModel *)0)
+     setModel(pieces.model);
++  flags = pieces.modelDeclared ? (flags|model_declared) : (flags & ~((uint4)model_declared));
+   updateAllTypes(pieces);
+   setInputLock(true);
+   setOutputLock(true);
+@@ -3843,6 +3844,7 @@ void FuncProto::getPieces(PrototypePieces &pieces) const
+ 
+ {
+   pieces.model = model;
++  pieces.modelDeclared = isModelDeclared();
+   if (store == (ProtoStore *)0) return;
+   pieces.outtype = store->getOutput()->getType();
+   int4 num = store->getNumInputs();
+@@ -4640,6 +4642,8 @@ void FuncProto::encode(Encoder &encoder) const
+ {
+   encoder.openElement(ELEM_PROTOTYPE);
+   encoder.writeString(ATTRIB_MODEL, model->getName());
++  if (isModelDeclared())
++    encoder.writeBool(ATTRIB_MODELDECLARED, true);
+   if (extrapop == ProtoModel::extrapop_unknown)
+     encoder.writeString(ATTRIB_EXTRAPOP, "unknown");
+   else
+@@ -4718,6 +4722,10 @@ void FuncProto::decode(Decoder &decoder,Architecture *glb)
+       if (decoder.readBool())
+ 	flags |= modellock;
+     }
++    else if (attribId == ATTRIB_MODELDECLARED) {
++      if (decoder.readBool())
++	flags |= model_declared;
++    }
+     else if (attribId == ATTRIB_DOTDOTDOT) {
+       if (decoder.readBool())
+ 	flags |= dotdotdot;
+diff --git a/src/decompiler/fspec.hh b/src/decompiler/fspec.hh
+index 656c866..120066c 100644
+--- a/src/decompiler/fspec.hh
++++ b/src/decompiler/fspec.hh
+@@ -381,6 +381,7 @@ struct PrototypePieces {
+   vector<Datatype *> intypes;	///< Input data-types
+   vector<string> innames;	///< Identifiers for input types
+   int4 firstVarArgSlot;		///< First position of a variable argument, or -1 if not varargs
++  bool modelDeclared = false;	///< The model was supplied in the declaration, independently of its effective value
+ };
+ 
+ /// \brief Description of the indirect effect a sub-function has on a memory range
+@@ -1355,7 +1356,8 @@ class FuncProto {
+     is_destructor = 0x400,	///< Function is an (object-oriented) destructor
+     has_thisptr= 0x800,		///< Function is a method with a 'this' pointer as an argument
+     is_override = 0x1000,	///< Set if \b this prototype is created to override a single call site
+-    auto_killedbycall = 0x2000	///< Potential output storage should always be considered \e killed \e by \e call
++    auto_killedbycall = 0x2000,	///< Potential output storage should always be considered \e killed \e by \e call
++    model_declared = 0x4000	///< Calling convention was supplied in the declaration
+   };
+   ProtoModel *model;		///< Model of for \b this prototype
+   ProtoStore *store;		///< Storage interface for parameters
+@@ -1393,6 +1395,7 @@ public:
+   const string &getModelName(void) const { return model->getName(); }	///< Get the prototype model name
+   int4 getModelExtraPop(void) const { return model->getExtraPop(); }	///< Get the \e extrapop of the prototype model
+   bool isModelUnknown(void) const { return model->isUnknown(); }	///< Return \b true if the prototype model is \e unknown
++  bool isModelDeclared(void) const { return ((flags&model_declared)!=0); }	///< Was the calling convention supplied in the declaration
+   bool printModelInDecl(void) const { return model->printInDecl(); }	///< Return \b true if the name should be printed in declarations
+ 
+   bool isInputLocked(void) const;					///< Are input data-types locked
+@@ -1616,7 +1619,7 @@ public:
+   ///
+   /// Get properties not including locking, error, and inlining flags.
+   /// \return the active set of flags for \b this prototype
+-  uint4 getComparableFlags(void) const { return (flags & (dotdotdot | is_constructor | is_destructor | has_thisptr )); }
++  uint4 getComparableFlags(void) const { return (flags & (dotdotdot | is_constructor | is_destructor | has_thisptr | model_declared )); }
+ 
+   bool isAutoKilledByCall(void) const;	///< Is a potential output automatically considered \e killed \e by \e call
+ 
+diff --git a/src/decompiler/grammar.cc b/src/decompiler/grammar.cc
+index d93a492..892e330 100644
+--- a/src/decompiler/grammar.cc
++++ b/src/decompiler/grammar.cc
+@@ -2321,6 +2321,7 @@ Datatype *FunctionModifier::modType(Datatype *base,const TypeDeclarator *decl,Ar
+   getInTypes(proto.intypes,glb);
+ 
+   proto.model = decl->getModel(glb);
++  proto.modelDeclared = decl->isModelDeclared();
+   return glb->types->getTypeCode(proto);
+ }
+ 
+@@ -2367,6 +2368,7 @@ bool TypeDeclarator::getPrototype(PrototypePieces &pieces,Architecture *glb) con
+   FunctionModifier *fmod = (FunctionModifier *)mod;
+ 
+   pieces.model = getModel(glb);
++  pieces.modelDeclared = isModelDeclared();
+   pieces.name = ident;
+   pieces.intypes.clear();
+   fmod->getInTypes(pieces.intypes,glb);
+diff --git a/src/decompiler/grammar.hh b/src/decompiler/grammar.hh
+index ca63db4..1ebe2db 100644
+--- a/src/decompiler/grammar.hh
++++ b/src/decompiler/grammar.hh
+@@ -183,6 +183,7 @@ public:
+   void setNumBits(int4 val) { numBits = val; }
+   const string &getIdentifier(void) const { return ident; }
+   ProtoModel *getModel(Architecture *glb) const;
++  bool isModelDeclared(void) const { return !model.empty(); }
+   bool getPrototype(PrototypePieces &pieces,Architecture *glb) const;
+   bool hasProperty(uint4 mask) { return ((flags&mask)!=0); }
+   Datatype *buildType(Architecture *glb) const;
+diff --git a/src/decompiler/grammar.y b/src/decompiler/grammar.y
+index 059993e..493db78 100644
+--- a/src/decompiler/grammar.y
++++ b/src/decompiler/grammar.y
+@@ -756,6 +756,7 @@ Datatype *FunctionModifier::modType(Datatype *base,const TypeDeclarator *decl,Ar
+   getInTypes(proto.intypes,glb);
+ 
+   proto.model = decl->getModel(glb);
++  proto.modelDeclared = decl->isModelDeclared();
+   return glb->types->getTypeCode(proto);
+ }
+ 
+@@ -802,6 +803,7 @@ bool TypeDeclarator::getPrototype(PrototypePieces &pieces,Architecture *glb) con
+   FunctionModifier *fmod = (FunctionModifier *)mod;
+ 
+   pieces.model = getModel(glb);
++  pieces.modelDeclared = isModelDeclared();
+   pieces.name = ident;
+   pieces.intypes.clear();
+   fmod->getInTypes(pieces.intypes,glb);
+diff --git a/src/decompiler/marshal.cc b/src/decompiler/marshal.cc
+index a365ead..811d401 100644
+--- a/src/decompiler/marshal.cc
++++ b/src/decompiler/marshal.cc
+@@ -1259,7 +1259,8 @@ AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+ AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
+ 
+ AttributeId ATTRIB_QUALIFIERS = AttributeId("qualifiers",160);
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",161); // Number serves as next open index
++AttributeId ATTRIB_MODELDECLARED = AttributeId("modeldeclared",161);
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",162); // Number serves as next open index
+ 
+ 
+ ElementId ELEM_DATA = ElementId("data",1);
+diff --git a/src/decompiler/marshal.hh b/src/decompiler/marshal.hh
+index f5734cc..e2b2d58 100644
+--- a/src/decompiler/marshal.hh
++++ b/src/decompiler/marshal.hh
+@@ -676,6 +676,7 @@ inline void PackedEncode::writeHeader(uint1 header,uint4 id)
+ 
+ extern ElementId ELEM_UNKNOWN;		///< Special element to represent an element with an unrecognized name
+ extern AttributeId ATTRIB_QUALIFIERS; ///< Applied const/volatile qualifiers on a canonical type reference
++extern AttributeId ATTRIB_MODELDECLARED; ///< Calling convention supplied independently of the effective model
+ extern ElementId ELEM_QUALIFIED_TYPE; ///< Qualified reference, decoded to an existing concrete class
+ extern AttributeId ATTRIB_UNKNOWN;	///< Special attribute  to represent an attribute with an unrecognized name
+ extern AttributeId ATTRIB_CONTENT;	///< Special attribute for XML text content of an element
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+index 3f52319..702d7c2 100644
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -330,7 +330,7 @@ void PrintC::pushTypeStart(const Datatype *ct,bool noident)
+     if (ct->getMetatype() == TYPE_PTR) {
+       pushPointerType((const TypePointer *)ct);
+       if (pointerModel != (const FuncProto *)0) {
+-	emitPrototypeModel(pointerModel);
++	emitTypeModel(pointerModel);
+ 	pointerModel = (const FuncProto *)0;
+       }
+       pushTypeQualifiers(ct->getDeclarationQualifiers());
+@@ -344,7 +344,7 @@ void PrintC::pushTypeStart(const Datatype *ct,bool noident)
+ 	if (i > 0 && typestack[i-1]->getMetatype() == TYPE_PTR)
+ 	  pointerModel = proto;
+ 	else
+-	  emitPrototypeModel(proto);
++	  emitTypeModel(proto);
+       }
+     }
+     else {
+@@ -2783,6 +2783,16 @@ void PrintC::emitPrototypeModel(const FuncProto *proto)
+   }
+ }
+ 
++void PrintC::emitTypeModel(const FuncProto *proto)
++
++{
++  if (proto->isModelDeclared()) {
++    Emit::syntax_highlight highlight = proto->isModelUnknown() ? Emit::error_color : Emit::keyword_color;
++    emit->print(proto->getModelName(),highlight);
++    emit->spaces(1);
++  }
++}
++
+ void PrintC::emitFunctionNameAndInputs(const Atom &atom)
+ 
+ {
+diff --git a/src/decompiler/printc.hh b/src/decompiler/printc.hh
+index 3d81973..8d1e3a0 100644
+--- a/src/decompiler/printc.hh
++++ b/src/decompiler/printc.hh
+@@ -167,6 +167,7 @@ protected:
+   virtual void emitAtom(const Atom &atom);
+   void emitFunctionNameAndInputs(const Atom &atom);		///< Emit the contextual function-name operand
+   void emitPrototypeModel(const FuncProto *proto);		///< Emit the calling convention when selected for display
++  virtual void emitTypeModel(const FuncProto *proto);		///< Emit a supplied calling convention in a type declaration
+   virtual bool expandTypeName(const Datatype *ct) const;		///< Decide whether a named declaration type should be expanded
+   void buildTypeStack(const Datatype *ct,vector<const Datatype *> &typestack);	///< Prepare to push components of a data-type declaration
+   void pushPrototypeInputs(const FuncProto *proto);				///< Push input parameters
+diff --git a/src/decompiler/type.cc b/src/decompiler/type.cc
+index 7b0d1ae..d83f9ce 100644
+--- a/src/decompiler/type.cc
++++ b/src/decompiler/type.cc
+@@ -3261,9 +3261,7 @@ void TypeCode::setPrototype(TypeFactory *tfact,const PrototypePieces &sig,Dataty
+   proto = new FuncProto();
+   proto->setInternal(sig.model,voidtype);
+ 
+-  proto->updateAllTypes(sig);
+-  proto->setInputLock(true);
+-  proto->setOutputLock(true);
++  proto->setPieces(sig);
+ }
+ 
+ /// The prototype is copied in.
+diff --git a/src/unittests/testidentity.cc b/src/unittests/testidentity.cc
+index 4b96f32..5fa2099 100644
+--- a/src/unittests/testidentity.cc
++++ b/src/unittests/testidentity.cc
+@@ -1,4 +1,5 @@
+ #include "architecture.hh"
++#include "grammar.hh"
+ #include "libdecomp.hh"
+ #include "printc.hh"
+ #include "test.hh"
+@@ -81,6 +82,7 @@ public:
+     Datatype *qualifiedMode = factory->getQualifiedType(mode,Datatype::qualifier_const);
+     PrototypePieces signature;
+     signature.model = arch->getModel("__cdecl16far");
++    signature.modelDeclared = true;
+     signature.name = "not_the_datatype_name";
+     signature.outtype = word;
+     signature.intypes.push_back(factory->getTypePointer(2,qualifiedRecord,1));
+@@ -184,6 +186,7 @@ TEST(explicit_native_code_identity) {
+   ASSERT_EQUALS(types.cases[15]->getDisplayName(),"CallbackAlias");
+   PrototypePieces signature;
+   signature.model = env.arch->getModel("__cdecl16far");
++  signature.modelDeclared = true;
+   signature.name = "ignored_for_anonymous_identity";
+   signature.outtype = types.word;
+   signature.intypes.push_back(factory->getTypePointer(2,types.cases[3],1));
+@@ -211,6 +214,7 @@ TEST(callback_model_declarations) {
+   printer.setMaxLineSize(200);
+   PrototypePieces signature;
+   signature.model = env.arch->getModel("__cdecl16far");
++  signature.modelDeclared = true;
+   signature.outtype = types.word;
+   signature.intypes.push_back(factory->getTypePointer(2,types.cases[3],1));
+   signature.innames.push_back("input");
+@@ -224,11 +228,14 @@ TEST(callback_model_declarations) {
+   ASSERT_EQUALS(printer.declaration(nestedPointer),"IdentityWord (__cdecl16far *const *volatile value)(const struct Alias *)");
+   ASSERT_EQUALS(printer.declaration(factory->getTypeArray(2,pointer)),"IdentityWord (__cdecl16far *value [2])(const struct Alias *)");
+   printer.setConvention(false);
+-  ASSERT_EQUALS(printer.declaration(pointer),"IdentityWord (*value)(const struct Alias *)");
++  ASSERT_EQUALS(printer.declaration(pointer),"IdentityWord (__cdecl16far *value)(const struct Alias *)");
+   printer.setConvention(true);
+   signature.model = env.arch->defaultfp;
+   ASSERT_EQUALS(signature.model->printInDecl(),false);
++  signature.modelDeclared = false;
+   ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,factory->getTypeCode(signature),1)),"IdentityWord (*value)(const struct Alias *)");
++  signature.modelDeclared = true;
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,factory->getTypeCode(signature),1)),"IdentityWord (__stdcall16near *value)(const struct Alias *)");
+   Datatype *namedPointer = factory->getTypePointer(4,types.callback,1);
+   ASSERT_EQUALS(printer.declaration(namedPointer),"Callback *value");
+   ASSERT_EQUALS(printer.declaration(types.callback),"Callback value");
+@@ -347,4 +354,159 @@ template<typename Encode,typename Decode> static void typedefLabelRoundTrip(void
+ TEST(explicit_native_typedef_label_xml_roundtrip) { typedefLabelRoundTrip<XmlEncode,XmlDecode>(); }
+ TEST(explicit_native_typedef_label_packed_roundtrip) { typedefLabelRoundTrip<PackedEncode,PackedDecode>(); }
+ 
++static PrototypePieces conventionSignature(Architecture *arch) {
++  PrototypePieces signature;
++  signature.model = arch->defaultfp;
++  signature.outtype = arch->types->getBase(2,TYPE_UINT,"PresenceWord");
++  signature.intypes.push_back(signature.outtype);
++  signature.innames.push_back("input");
++  signature.firstVarArgSlot = -1;
++  return signature;
++}
++
++TEST(callback_convention_presence_identity) {
++  IdentityEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  PrototypePieces signature = conventionSignature(env.arch);
++  TypeCode *absent = factory->getTypeCode(signature);
++  signature.modelDeclared = true;
++  TypeCode *declared = factory->getTypeCode(signature);
++  ASSERT_NOT_EQUALS(absent,declared);
++  ASSERT_NOT_EQUALS(absent->compareBasic(declared),0);
++  ASSERT_NOT_EQUALS(absent->compareDependency(*declared),0);
++  ASSERT_EQUALS(absent->getPrototype()->isModelDeclared(),false);
++  ASSERT_EQUALS(declared->getPrototype()->isModelDeclared(),true);
++  ASSERT_EQUALS(absent->getPrototype()->isModelLocked(),declared->getPrototype()->isModelLocked());
++  ASSERT_EQUALS(absent->getPrototype()->isInputLocked(),declared->getPrototype()->isInputLocked());
++  ASSERT_EQUALS(absent->getPrototype()->isOutputLocked(),declared->getPrototype()->isOutputLocked());
++  ASSERT_EQUALS(absent->getPrototype()->getParam(0)->getAddress(),declared->getPrototype()->getParam(0)->getAddress());
++  ASSERT(absent->getPrototype()->isCompatible(*declared->getPrototype()));
++  ASSERT(declared->getPrototype()->isCompatible(*absent->getPrototype()));
++  PrototypePieces recovered;
++  declared->getPrototype()->getPieces(recovered);
++  ASSERT(recovered.modelDeclared);
++  ASSERT_EQUALS(factory->getTypeCode(recovered),declared);
++  FuncProto copy;
++  copy.copy(*declared->getPrototype());
++  ASSERT(copy.isModelDeclared());
++  signature.modelDeclared = false;
++  copy.setPieces(signature);
++  ASSERT_EQUALS(copy.isModelDeclared(),false);
++  copy.setModelLock(false);
++  copy.setInputLock(true);
++  copy.setOutputLock(true);
++  ASSERT_EQUALS(copy.isModelDeclared(),false);
++  ASSERT(copy.isModelLocked());
++}
++
++class AttributeIdentityPrinter : public IdentityPrinter {
++protected:
++  virtual void emitTypeModel(const FuncProto *prototype) {
++    if (!prototype->isModelDeclared()) return;
++    emit->print("__attribute__((r2_cc(\"" + prototype->getModelName() + "\")))",Emit::keyword_color);
++    emit->spaces(1);
++  }
++public:
++  AttributeIdentityPrinter(Architecture *arch) : IdentityPrinter(arch) {}
++};
++
++TEST(callback_convention_presence_rendering) {
++  IdentityEnvironment env;
++  TypeFactory *factory = env.arch->types;
++  PrototypePieces signature = conventionSignature(env.arch);
++  TypeCode *absent = factory->getTypeCode(signature);
++  signature.modelDeclared = true;
++  TypeCode *declared = factory->getTypeCode(signature);
++  AttributeIdentityPrinter printer(env.arch);
++  printer.setMaxLineSize(200);
++  printer.setConvention(false);
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,absent,1)),"PresenceWord (*value)(PresenceWord)");
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(2,declared,1)),"PresenceWord (__attribute__((r2_cc(\"__stdcall16near\"))) *value)(PresenceWord)");
++  ASSERT_EQUALS(printer.declaration(declared),"PresenceWord __attribute__((r2_cc(\"__stdcall16near\"))) value(PresenceWord)");
++  signature.model = env.arch->getModel("__cdecl16far");
++  signature.modelDeclared = false;
++  ASSERT_EQUALS(printer.declaration(factory->getTypePointer(4,factory->getTypeCode(signature),1)),"PresenceWord (*value)(PresenceWord)");
++}
++
++template<typename Encode,typename Decode> static void conventionPresenceRoundTrip(void) {
++  IdentityEnvironment source;
++  TypeFactory *factory = source.arch->types;
++  PrototypePieces signature = conventionSignature(source.arch);
++  vector<TypeCode *> cases = {factory->getTypeCode(signature)};
++  signature.modelDeclared = true;
++  cases.push_back(factory->getTypeCode(signature));
++  signature.model = source.arch->getModel("__cdecl16far");
++  cases.push_back(factory->getTypeCode(signature));
++  signature.modelDeclared = false;
++  cases.push_back(factory->getTypeCode(signature));
++  signature.modelDeclared = true;
++  cases.push_back(factory->getTypeCode(signature,"PresenceCallback",701));
++  cases.push_back((TypeCode *)factory->getTypedef(cases[4],"PresenceAlias",702,0));
++  Datatype *qualified = factory->getQualifiedType(factory->getTypePointer(4,cases[2],1),Datatype::qualifier_const);
++  ostringstream output;
++  Encode encoder(output);
++  encoder.openElement(ELEM_DATA);
++  factory->encode(encoder);
++  for(TypeCode *code : cases)
++    code->encodeRef(encoder);
++  qualified->encodeRef(encoder);
++  encoder.closeElement(ELEM_DATA);
++  IdentityEnvironment restored;
++  TypeFactory *target = restored.arch->types;
++  istringstream input(output.str());
++  Decode decoder(restored.arch);
++  decoder.ingestStream(input);
++  uint4 data = decoder.openElement(ELEM_DATA);
++  target->decode(decoder);
++  vector<TypeCode *> actual;
++  for(TypeCode *code : cases) {
++    TypeCode *result = (TypeCode *)target->decodeType(decoder);
++    actual.push_back(result);
++    ASSERT_EQUALS(result->getName(),code->getName());
++    ASSERT_EQUALS(result->getId(),code->getId());
++    const FuncProto *prototype = result->getPrototype();
++    const FuncProto *original = code->getPrototype();
++    ASSERT_EQUALS(prototype->isModelDeclared(),original->isModelDeclared());
++    ASSERT_EQUALS(prototype->getModelName(),original->getModelName());
++    ASSERT_EQUALS(prototype->isModelLocked(),original->isModelLocked());
++    ASSERT_EQUALS(prototype->isInputLocked(),original->isInputLocked());
++    ASSERT_EQUALS(prototype->isOutputLocked(),original->isOutputLocked());
++    ASSERT_EQUALS(prototype->getParam(0)->getAddress().getOffset(),original->getParam(0)->getAddress().getOffset());
++    PrototypePieces recovered;
++    prototype->getPieces(recovered);
++    ASSERT_EQUALS(target->getTypeCode(recovered)->getPrototype()->isModelDeclared(),original->isModelDeclared());
++  }
++  Datatype *restoredQualified = target->decodeType(decoder);
++  decoder.closeElement(data);
++  ASSERT_NOT_EQUALS(actual[0],actual[1]);
++  ASSERT_NOT_EQUALS(actual[2],actual[3]);
++  ASSERT(actual[0]->getPrototype()->isCompatible(*actual[1]->getPrototype()));
++  ASSERT(actual[2]->getPrototype()->isCompatible(*actual[3]->getPrototype()));
++  ASSERT_EQUALS(actual[2]->getPrototype()->getParam(0)->getAddress().getOffset(),4);
++  ASSERT_EQUALS(actual[5]->getTypedef(),actual[4]);
++  ASSERT(restoredQualified->isConst());
++  ASSERT_EQUALS(((TypePointer *)restoredQualified)->getPtrTo(),actual[2]);
++}
++
++TEST(callback_convention_presence_xml_roundtrip) { conventionPresenceRoundTrip<XmlEncode,XmlDecode>(); }
++TEST(callback_convention_presence_packed_roundtrip) { conventionPresenceRoundTrip<PackedEncode,PackedDecode>(); }
++
++TEST(callback_convention_presence_native_parser) {
++  IdentityEnvironment env;
++  PrototypePieces absent;
++  istringstream absentInput("void ordinary(void);");
++  parse_protopieces(absent,absentInput,env.arch);
++  PrototypePieces declared;
++  istringstream declaredInput("void __stdcall16near supplied(void);");
++  parse_protopieces(declared,declaredInput,env.arch);
++  ASSERT_EQUALS(absent.model,declared.model);
++  ASSERT_EQUALS(absent.modelDeclared,false);
++  ASSERT(declared.modelDeclared);
++  string name;
++  istringstream callbackInput("void __stdcall16near (*callback)(void)");
++  TypePointer *callback = (TypePointer *)parse_type(callbackInput,name,env.arch);
++  ASSERT_EQUALS(callback->getMetatype(),TYPE_PTR);
++  ASSERT(((TypeCode *)callback->getPtrTo())->getPrototype()->isModelDeclared());
++}
++
+ } // End namespace ghidra
