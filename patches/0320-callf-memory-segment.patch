@@ -1,0 +1,78 @@
+--- a/src/Processors/x86/data/languages/ia.sinc
++++ b/src/Processors/x86/data/languages/ia.sinc
+@@ -2986,7 +2986,7 @@
+ :CALLF ptr1616      is vexMode=0 & addrsize=1 & opsize=0 & byte=0x9a; ptr1616           { push42(CS); build ptr1616; push42(&:2 inst_next); call ptr1616; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=0 & opsize=1 & byte=0x9a; ptr1632           { push22(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=1 & opsize=1 & byte=0x9a; ptr1632           { pushseg44(CS); build ptr1632; push44(&:4 inst_next); call ptr1632; }
+-:CALLF addr16       is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; addr16 & reg_opcode=3 ... { local ptr:$(SIZE) = segment(DS,addr16); local addrptr:$(SIZE) = segment(*:2 (ptr+2),*:2 ptr);
++:CALLF Mem16        is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; Mem16 & reg_opcode=3 ... { local ptr:$(SIZE) = Mem16; local addrptr:$(SIZE) = segment(*:2 (ptr+2),*:2 ptr);
+                                                                                                   push22(CS); push22(&:2 inst_next); call [addrptr]; }
+ :CALLF addr32       is vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; push42(CS); push42(&:2 inst_next); call [dest]; }
+ @ifdef IA64
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -1296,6 +1296,64 @@
+     ASSERT(output.str().find("segmentop") != string::npos);
+     arch->print->setOutputStream((ostream *)0);
+   }
++}
++
++static void checkFarCallMemorySegment(const string &instruction,const string &selector,const string &base) {
++  SegmentedEnvironment env(false,"x86:LE:16:Protected Mode:default","558bec6a07" + instruction + "83c4025dc3");
++  PcodeEmitFd emitter;
++  emitter.setFuncdata(env.fd);
++  ASSERT_EQUALS(env.arch->translate->oneInstruction(emitter,env.fd->getAddress() + 5),instruction.size() / 2);
++  vector<PcodeOp *> segments;
++  int4 loads = 0;
++  int4 stores = 0;
++  int4 pushes = 0;
++  int4 calls = 0;
++  PcodeOp *offset = (*env.fd->beginOpAll()).second;
++  ASSERT_EQUALS(offset->code(),CPUI_INT_ADD);
++  ASSERT_EQUALS(offset->getIn(0)->getAddr(),env.arch->translate->getRegister(base).getAddr());
++  ASSERT_EQUALS(offset->getIn(1)->getOffset(),4);
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->code() == CPUI_CALLOTHER)
++      segments.push_back(op);
++    else if (op->code() == CPUI_LOAD) {
++      ASSERT_EQUALS(op->getOut()->getSize(),2);
++      ++loads;
++    }
++    else if (op->code() == CPUI_STORE) {
++      ASSERT_EQUALS(op->getIn(2)->getSize(),2);
++      ++stores;
++    }
++    else if (op->code() == CPUI_INT_SUB) {
++      ASSERT_EQUALS(op->getOut()->getAddr(),env.arch->translate->getRegister("SP").getAddr());
++      ASSERT_EQUALS(op->getIn(1)->getOffset(),2);
++      ++pushes;
++    }
++    else if (op->code() == CPUI_CALLIND) {
++      ASSERT_EQUALS(op->getIn(0)->getSize(),4);
++      ++calls;
++    }
++  }
++  ASSERT_EQUALS(segments.size(),4);
++  ASSERT_EQUALS(segments[0]->getIn(1)->getAddr(),env.arch->translate->getRegister(selector).getAddr());
++  ASSERT_EQUALS(segments[0]->getIn(2)->getAddr(),offset->getOut()->getAddr());
++  ASSERT_EQUALS(loads,2);
++  ASSERT_EQUALS(stores,2);
++  ASSERT_EQUALS(pushes,2);
++  ASSERT_EQUALS(calls,1);
++}
++
++TEST(segmented_far_call_bp_memory) {
++  checkFarCallMemorySegment("ff5e04","SS","BP");
++}
++
++TEST(segmented_far_call_ds_memory) {
++  checkFarCallMemorySegment("ff5f04","DS","BX");
++}
++
++TEST(segmented_far_call_segment_override) {
++  checkFarCallMemorySegment("3eff5e04","DS","BP");
++  checkFarCallMemorySegment("36ff5f04","SS","BX");
+ }
+ 
+ // These retained bytes are the original SCRANTIC NE1 fill body/wrapper and the observed JMP/CALL_RETURN regression from segmented-c.xml.
