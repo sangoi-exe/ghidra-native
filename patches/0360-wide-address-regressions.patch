@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/unittests/testsegmentedwide.cc
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,450 @@
 +#include "architecture.hh"
 +#include "coreaction.hh"
 +#include "emulate.hh"
@@ -17,10 +17,10 @@
 +class WideEnvironment {
 +public:
 +  Architecture *arch;
-+  WideEnvironment(const string &bytes,uintb entry = protectedCoordinate(0x1234,0x1000)) {
++  WideEnvironment(const string &bytes,uintb entry = protectedCoordinate(0x1234,0x1000),const string &language = "x86:LE:16:Protected Mode:default") {
 +    startDecompilerLibrary(getenv("SLEIGHHOME"));
 +    ostringstream xml;
-+    xml << "<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x" << hex << entry;
++    xml << "<binaryimage arch=\"" << language << "\"><bytechunk space=\"ram\" offset=\"0x" << hex << entry;
 +    xml << "\" readonly=\"true\">" << bytes << "</bytechunk></binaryimage>";
 +    istringstream input(xml.str());
 +    DocumentStorage store;
@@ -384,6 +384,70 @@
 +  }
 +  ASSERT_EQUALS(state.getValue("DS"),0x4567);
 +  ASSERT_EQUALS(state.getValue("SS"),0x6789);
++}
++
++static void checkRealModePointerGlobal(int4 pointerSize,uintb raw) {
++  WideEnvironment environment("cb",0x1000,"x86:LE:16:Real Mode:default");
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultDataSpace();
++  Address entry(ram,0x1000);
++  TrackedContext ds;
++  ds.loc = arch->translate->getRegister("DS");
++  ds.val = 0x1234;
++  arch->context->createSet(entry,entry+1).push_back(ds);
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  Scope *global = arch->symboltab->getGlobalScope();
++  Symbol *named = global->addSymbol("real_global",word,Address(ram,0x179b8),Address())->getSymbol();
++  Funcdata *fd = global->addFunction(entry,"real_pointer")->getFunction();
++  fd->setHighLevel();
++  fd->startTypeRecovery();
++  BlockBasic block(fd);
++  TypePointer *pointer = arch->types->getTypePointer(pointerSize,word,1);
++  Varnode *constant = fd->newConstant(pointerSize,raw);
++  constant->updateType(pointer,true,true);
++  PcodeOp *copy = fd->newOp(1,entry);
++  fd->opSetOpcode(copy,CPUI_COPY);
++  fd->opSetInput(copy,constant,0);
++  fd->newUniqueOut(pointerSize,copy)->updateType(pointer,true,true);
++  fd->opInsertEnd(copy,&block);
++  ActionConstantPtr action("base");
++  action.reset(*fd);
++  action.apply(*fd);
++  PcodeOp *reconstruction = copy;
++  if (pointerSize == 2) {
++    ASSERT_EQUALS(copy->code(),CPUI_SUBPIECE);
++    ASSERT_EQUALS(copy->getIn(1)->getOffset(),0);
++    reconstruction = copy->getIn(0)->getDef();
++  }
++  ASSERT_EQUALS(reconstruction->code(),CPUI_PTRSUB);
++  ASSERT_EQUALS(reconstruction->getIn(0)->getOffset(),0);
++  ASSERT_EQUALS(reconstruction->getIn(1)->getOffset(),0x12345678);
++  ASSERT_EQUALS(reconstruction->getOut()->getSize(),4);
++  ASSERT_EQUALS(copy->getOut()->getSize(),pointerSize);
++  uintb value = reconstruction->getOpcode()->getBehavior()->evaluateBinary(4,4,0,reconstruction->getIn(1)->getOffset());
++  if (pointerSize == 2)
++    value = copy->getOpcode()->getBehavior()->evaluateBinary(2,4,value,copy->getIn(1)->getOffset());
++  ASSERT_EQUALS(value,raw);
++  Datatype *base = ((TypePointer *)reconstruction->getIn(0)->getTypeReadFacing(reconstruction))->getPtrTo();
++  ASSERT_EQUALS(base->getMetatype(),TYPE_SPACEBASE);
++  TypeSpacebase *spacebase = (TypeSpacebase *)base;
++  Address resolved = spacebase->getAddress(reconstruction->getIn(1)->getOffset(),4,entry);
++  ASSERT_EQUALS(resolved,Address(ram,0x179b8));
++  MapEntry *associated = global->queryContainer(resolved,1,Address());
++  ASSERT(associated != (MapEntry *)0);
++  ASSERT_EQUALS(associated->getSymbol(),named);
++  ASSERT_EQUALS(associated->getSymbol()->getName(),"real_global");
++  int8 remainder;
++  ASSERT_EQUALS(spacebase->getSubType(reconstruction->getIn(1)->getOffset(),&remainder),word);
++  ASSERT_EQUALS(remainder,0);
++}
++
++TEST(real_mode_far_pointer_global) {
++  checkRealModePointerGlobal(4,0x12345678);
++}
++
++TEST(real_mode_near_pointer_global) {
++  checkRealModePointerGlobal(2,0x5678);
 +}
 +
 +} // End namespace ghidra

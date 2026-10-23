@@ -21,16 +21,17 @@
        markNearPointers(spc, val);
      }
    }
-@@ -1469,7 +1471,11 @@
+@@ -1469,7 +1471,12 @@
  Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb &fullEncoding)
  
  {
 -  int4 innersz = segop->getInnerSize();
-+  if (sz < 0 || (sz == spc->getAddrSize() && sz > glb->types->getSizeOfAltPointer())) {
++  bool wideSegmented = segop->hasFarPointerSupport() && spc->getAddrSize() > glb->types->getSizeOfAltPointer();
++  if (wideSegmented && (sz < 0 || sz == spc->getAddrSize())) {
 +    fullEncoding = val;
 +    return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
 +  }
-+  int4 innersz = glb->types->getSizeOfPointer();
++  int4 innersz = wideSegmented ? glb->types->getSizeOfPointer() : segop->getInnerSize();
    if (sz >= 0 && sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
    // In this case the address offset is not fully specified
    // we check if the rest is stored in a context variable
@@ -42,7 +43,7 @@
    uintb addrOff = AddrSpace::byteToAddress(off, spaceid->getWordSize());	// Convert from byte offset to address unit
 -  // It should always be the case that the given offset represents a full encoding of the
 -  // pointer, so the point of context is unused and the size is given as -1
-+  // Spacebase displacements are analysis coordinates, not encoded machine pointers.
++  // Global offsets are full encodings, or analysis coordinates in widened segmented spaces.
    Address nullPoint;
    uintb fullEncoding;
    Address addr = glb->resolveConstant(spaceid, addrOff, -1, nullPoint, fullEncoding);
@@ -52,7 +53,7 @@
    uintb addrOff = AddrSpace::byteToAddress(off, spaceid->getWordSize());	// Convert from byte offset to address unit
 -  // It should always be the case that the given offset represents a full encoding of the
 -  // pointer, so the point of context is unused and the size is given as -1
-+  // Spacebase displacements are analysis coordinates, not encoded machine pointers.
++  // Global offsets are full encodings, or analysis coordinates in widened segmented spaces.
    Address nullPoint;
    uintb fullEncoding;
    Address addr = glb->resolveConstant(spaceid, addrOff, -1, nullPoint, fullEncoding);
@@ -61,7 +62,7 @@
  {
    uintb fullEncoding;
 -  // Currently a constant off of a global spacebase must be a full pointer encoding
-+  // A global spacebase displacement is an analysis coordinate.
++  // A global offset supplies a full encoding, or an analysis coordinate in widened segmented spaces.
    if (localframe.isInvalid())
 -    sz = -1;	// Set size to -1 to guarantee that full encoding recovery isn't launched
 +    sz = -1;
@@ -98,29 +99,48 @@
  }
 --- a/src/decompiler/coreaction.cc
 +++ b/src/decompiler/coreaction.cc
-@@ -1154,6 +1154,9 @@
+@@ -1154,6 +1154,12 @@
    }
  
    if (rampoint.isInvalid()) return (MapEntry *)0;
-+  uintb coordinate = AddrSpace::byteToAddress(rampoint.getOffset(),spc->getWordSize());
-+  if ((coordinate & calc_mask(vn->getSize())) != (fullEncoding & calc_mask(vn->getSize())))
-+    return (MapEntry *)0;
++  SegmentOp *segment = glb->getSegmentOp(spc);
++  if (segment != (SegmentOp *)0 && segment->hasFarPointerSupport() && spc->getAddrSize() > glb->types->getSizeOfAltPointer()) {
++    uintb coordinate = AddrSpace::byteToAddress(rampoint.getOffset(),spc->getWordSize());
++    if ((coordinate & calc_mask(vn->getSize())) != (fullEncoding & calc_mask(vn->getSize())))
++      return (MapEntry *)0;
++  }
      // Since we are looking for a global address
      // Assume it is address tied and use empty usepoint
    MapEntry *entry = data.getScopeLocal()->getParent()->queryContainer(rampoint,1,Address());
 --- a/src/decompiler/funcdata.cc
 +++ b/src/decompiler/funcdata.cc
-@@ -399,8 +399,8 @@
-     opSetOpcode(addOp,CPUI_PTRSUB);
+@@ -346,6 +346,5 @@
+ ///
+ /// The PTRSUB takes the constant 0 as its first input, which is marked
+-/// as a \e spacebase to indicate this situation. The second input to PTRSUB becomes
+-/// the offset to the Symbol within the address space. An additional INT_SUB may be inserted
++/// as a \e spacebase to indicate this situation. The second input retains the full pointer encoding, or an analysis coordinate when the segmented address is wider than ordinary far pointers. An additional INT_SUB may be inserted
+ /// to get from the start of the Symbol to the address indicated by the original
+ /// constant pointer.
+@@ -354,5 +353,5 @@
+ /// \param entry is the Symbol being pointed (in)to
+ /// \param rampoint is the constant pointer interpreted as an Address
+-/// \param origval is the constant
++/// \param origval is the resolver's full value for the original constant
+ /// \param origsize is the size of the constant
+ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,MapEntry *entry,const Address &rampoint,uintb origval,int4 origsize)
+@@ -400,6 +399,9 @@
    }
    outvn = addOp->getOut();
 -  // Make sure newconstant and extra preserve origval in address units
 -  uintb newconstoff = origval - extra;		// everything is already in address units
-+  uintb coordinate = AddrSpace::byteToAddress(rampoint.getOffset(),spaceid->getWordSize());
-+  uintb newconstoff = coordinate - extra;
++  uintb newconstoff = origval;
++  SegmentOp *segment = glb->getSegmentOp(spaceid);
++  if (segment != (SegmentOp *)0 && segment->hasFarPointerSupport() && spaceid->getAddrSize() > glb->types->getSizeOfAltPointer())
++    newconstoff = AddrSpace::byteToAddress(rampoint.getOffset(),spaceid->getWordSize());
++  newconstoff -= extra;
    newconst = newConstant(sz,newconstoff);
    newconst->setSymbolCheck(Varnode::symcheck_complete);	// No longer need to check this constant as symbolref
-   if (spaceid->isTruncated())
 --- a/src/decompiler/printc.cc
 +++ b/src/decompiler/printc.cc
 @@ -1860,8 +1860,21 @@
@@ -201,3 +221,29 @@
    if (invn->isSpacebase()) return (Datatype *)0;
    type_metatype metain = alttype->getMetatype();
    if (metain != TYPE_PTR) return (Datatype *)0;
+--- a/src/decompiler/translate.hh
++++ b/src/decompiler/translate.hh
+@@ -147,9 +147,7 @@
+   ///
+   /// Given a native constant in a specific context, resolve what address is being referred to.
+   /// The constant can be a partially encoded pointer, in which case the full pointer encoding
+-  /// is recovered as well as the address.  Whether or not a pointer is partially encoded or not
+-  /// is determined by the \e sz parameter, indicating the number of bytes in the pointer. A value
+-  /// of -1 here indicates that the pointer is known to be a full encoding.
++  /// is recovered as well as the address. The \e sz parameter gives the pointer byte width. A value of -1 suppresses partial recovery and supplies an analysis coordinate for segmented spaces whose address is wider than ordinary far pointers, or a full native encoding otherwise.
+   /// \param val is constant to be resolved to an address
+   /// \param sz is the size of \e val in context (or -1).
+   /// \param point is the address at which this constant is being used
+--- a/src/decompiler/translate.cc
++++ b/src/decompiler/translate.cc
+@@ -608,9 +608,7 @@
+ /// If there is a special resolver for the AddrSpace, this is invoked, otherwise
+ /// basic wordsize conversion and wrapping is performed. If the address encoding is
+ /// partial (as in a \e near pointer) and the full encoding can be recovered, it is passed back.
+-/// The \e sz parameter indicates the number of bytes in constant and is used to determine if
+-/// the constant is a partial or full pointer encoding. A value of -1 indicates the value is
+-/// known to be a full encoding.
++/// The \e sz parameter gives the constant byte width and distinguishes partial from full pointer encodings. A value of -1 suppresses partial recovery: it denotes an analysis coordinate for segmented spaces whose address is wider than ordinary far pointers, or a full native encoding otherwise.
+ /// \param spc is the space to generate the address from
+ /// \param val is the constant encoding of the address
+ /// \param sz is the size of the constant encoding (or -1)
