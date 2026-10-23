@@ -1,5 +1,5 @@
 diff --git a/src/decompiler/coreaction.cc b/src/decompiler/coreaction.cc
-index 626e5ba..e4fbb1b 100644
+index 626e5ba..b4ceb0f 100644
 --- a/src/decompiler/coreaction.cc
 +++ b/src/decompiler/coreaction.cc
 @@ -1346,6 +1346,93 @@ void ActionVarnodeProps::handleExtendedZero(Varnode *vn,Funcdata &data)
@@ -96,7 +96,37 @@ index 626e5ba..e4fbb1b 100644
  int4 ActionVarnodeProps::apply(Funcdata &data)
  
  {
-@@ -5719,6 +5806,8 @@ void ActionDatabase::universalAction(Architecture *conf)
+@@ -3542,18 +3629,17 @@ bool ActionMarkImplied::checkImpliedCover(Funcdata &data,Varnode *vn)
+   op = vn->getDef();
+   if (op->code() == CPUI_LOAD) { // Check for loads crossing stores
+     list<PcodeOp *>::const_iterator oiter,iterend;
+-    iterend = data.endOp(CPUI_STORE);
+-    for(oiter=data.beginOp(CPUI_STORE);oiter!=iterend;++oiter) {
+-      storeop = *oiter;
+-      if (storeop->isDead()) continue;
+-      if (vn->getCover()->contain(storeop,2)) {
+-				// The LOAD crosses a STORE. We are cavalier
+-				// and let it through unless we can verify
+-				// that the pointers are actually the same
+-	if (storeop->getIn(0)->getOffset() == op->getIn(0)->getOffset()) {
+-	  //	  if (!functionalDifference(storeop->getIn(1),op->getIn(1),2)) return false;
+-	  if (isPossibleAlias(storeop->getIn(1),op->getIn(1),2)) return false;
+-	}
++    for(OpCode opc : {CPUI_STORE,CPUI_CALLOTHER}) {
++      iterend = data.endOp(opc);
++      for(oiter=data.beginOp(opc);oiter!=iterend;++oiter) {
++        storeop = *oiter;
++        if (storeop->isDead() || storeop->getMemoryAccess() != CPUI_STORE) continue;
++        if (vn->getCover()->contain(storeop,2)) {
++          // Do not imply a LOAD across a write through a possibly identical pointer.
++          if (storeop->getMemorySpace() == op->getMemorySpace()) {
++            if (isPossibleAlias(storeop->getIn(1),op->getIn(1),2)) return false;
++          }
++        }
+       }
+     }
+   }
+@@ -5719,6 +5805,8 @@ void ActionDatabase::universalAction(Architecture *conf)
        actmainloop->addAction( new ActionHeritage("base") );
        actmainloop->addAction( new ActionParamDouble("protorecovery") );
        actmainloop->addAction( new ActionSegmentize("base"));
@@ -105,7 +135,7 @@ index 626e5ba..e4fbb1b 100644
        actmainloop->addAction( new ActionInternalStorage("base") );
        actmainloop->addAction( new ActionForceGoto("blockrecovery") );
        actmainloop->addAction( new ActionDirectWrite("protorecovery_a", true) );
-@@ -5729,7 +5818,6 @@ void ActionDatabase::universalAction(Architecture *conf)
+@@ -5729,7 +5817,6 @@ void ActionDatabase::universalAction(Architecture *conf)
        actmainloop->addAction( new ActionRestrictLocal("localrecovery") ); // Do before dead code removed
        actmainloop->addAction( new ActionDeadCode("deadcode") );
        actmainloop->addAction( new ActionDynamicMapping("dynamic") ); // Must come before restructurevarnode and infertypes
@@ -179,6 +209,174 @@ index b2c20ab..b043ac7 100644
  /// The Varnode is assumed not fully linked.  The read or write action is
  /// modeled by inserting a special \e user op that represents the action. The given Varnode is
  /// replaced by a temporary Varnode within the data-flow, and the original address becomes
+diff --git a/src/decompiler/heritage.cc b/src/decompiler/heritage.cc
+index a66fcd4..e6624e6 100644
+--- a/src/decompiler/heritage.cc
++++ b/src/decompiler/heritage.cc
+@@ -858,7 +858,7 @@ void LoadGuard::setPointerRanges(const CircleRange &range)
+ void LoadGuard::addDependencyRanges(RangeList &ranges) const
+ 
+ {
+-  uintb extra = ((op->code() == CPUI_LOAD) ? op->getOut()->getSize() : op->getIn(2)->getSize()) - 1;
++  uintb extra = ((op->getMemoryAccess() == CPUI_LOAD) ? op->getOut()->getSize() : op->getIn(2)->getSize()) - 1;
+   uintb highest = spc->getHighest();
+   for(std::set<Range>::const_iterator iter=pointerRanges.begin();iter!=pointerRanges.end();++iter) {
+     uintb first = (*iter).getFirst();
+@@ -882,7 +882,7 @@ bool LoadGuard::mayAlias(const Address &addr,int4 size) const
+ 
+ {
+   if (addr.getSpace() != spc) return false;
+-  uintb extra = ((op->code() == CPUI_LOAD) ? op->getOut()->getSize() : op->getIn(2)->getSize()) - 1;
++  uintb extra = ((op->getMemoryAccess() == CPUI_LOAD) ? op->getOut()->getSize() : op->getIn(2)->getSize()) - 1;
+   Address first(spc,spc->wrapOffset(addr.getOffset() - extra));
+   return guardRangesOverlap(pointerRanges,first,(uintb)size + extra);
+ }
+@@ -1009,28 +1009,29 @@ void Heritage::generateStoreGuard(StackNode &node,PcodeOp *op,AddrSpace *spc)
+ bool Heritage::protectFreeStores(AddrSpace *spc,vector<PcodeOp *> &freeStores)
+ 
+ {
+-  list<PcodeOp *>::const_iterator iter = fd->beginOp(CPUI_STORE);
+-  list<PcodeOp *>::const_iterator enditer = fd->endOp(CPUI_STORE);
+   bool hasNew = false;
+-  while(iter != enditer) {
+-    PcodeOp *op = *iter;
+-    ++iter;
+-    if (op->isDead()) continue;
+-    Varnode *vn = op->getIn(1);
+-    while (vn->isWritten()) {
+-      PcodeOp *defOp = vn->getDef();
+-      OpCode opc = defOp->code();
+-      if (opc == CPUI_COPY)
+-	vn = defOp->getIn(0);
+-      else if (opc == CPUI_INT_ADD && defOp->getIn(1)->isConstant())
+-	vn = defOp->getIn(0);
+-      else
+-	break;
+-    }
+-    if (vn->isFree() && vn->getSpace() == spc) {
+-      fd->opMarkSpacebasePtr(op);	// Mark op as spacebase STORE, even though we're not sure
+-      freeStores.push_back(op);
+-      hasNew = true;
++  for(OpCode opc : {CPUI_STORE,CPUI_CALLOTHER}) {
++    list<PcodeOp *>::const_iterator iter = fd->beginOp(opc);
++    list<PcodeOp *>::const_iterator enditer = fd->endOp(opc);
++    for(;iter!=enditer;++iter) {
++      PcodeOp *op = *iter;
++      if (op->isDead() || op->getMemoryAccess() != CPUI_STORE) continue;
++      Varnode *vn = op->getIn(1);
++      while(vn->isWritten()) {
++        PcodeOp *defOp = vn->getDef();
++        OpCode defCode = defOp->code();
++        if (defCode == CPUI_COPY)
++          vn = defOp->getIn(0);
++        else if (defCode == CPUI_INT_ADD && defOp->getIn(1)->isConstant())
++          vn = defOp->getIn(0);
++        else
++          break;
++      }
++      if (vn->isFree() && vn->getSpace() == spc) {
++        fd->opMarkSpacebasePtr(op);	// The pointer may still resolve to the stack.
++        freeStores.push_back(op);
++        hasNew = true;
++      }
+     }
+   }
+   return hasNew;
+@@ -1138,18 +1139,18 @@ bool Heritage::discoverIndexedStackPointers(AddrSpace *spc,vector<PcodeOp *> &fr
+ 	  break;
+ 	}
+ 	case CPUI_LOAD:
++	case CPUI_STORE:
++	case CPUI_CALLOTHER:
+ 	{
++	  OpCode access = op->getMemoryAccess();
++	  if (access == CPUI_MAX || op->getIn(1) != curNode.vn) break;
+ 	  // Note that if ANY path has one of the traversals (non-constant ADD or MULTIEQUAL), then
+ 	  // THIS path must have one of the traversals, because the only other acceptable path elements
+ 	  // (INDIRECT/COPY/constant ADD) have only one path through.
+-	  if (curNode.traversals != 0) {
++	  if (access == CPUI_LOAD && curNode.traversals != 0) {
+ 	    generateLoadGuard(curNode,op,spc);
+ 	  }
+-	  break;
+-	}
+-	case CPUI_STORE:
+-	{
+-	  if (op->getIn(1) == curNode.vn) {	// Make sure the STORE pointer comes from our path
++	  else if (access == CPUI_STORE) {
+ 	    if (curNode.traversals != 0) {
+ 	      generateStoreGuard(curNode, op, spc);
+ 	    }
+@@ -1617,17 +1618,19 @@ void Heritage::guardStores(const Address &addr,int4 size,vector<Varnode *> &writ
+   AddrSpace *spc = addr.getSpace();
+   AddrSpace *container = spc->getContain();
+ 
+-  iterend = fd->endOp(CPUI_STORE);
+-  for(iter=fd->beginOp(CPUI_STORE);iter!=iterend;++iter) {
+-    op = *iter;
+-    if (op->isDead()) continue;
+-    AddrSpace *storeSpace = op->getIn(0)->getSpaceFromConst();
+-    if ((container == storeSpace && op->usesSpacebasePtr()) ||
+-	(spc == storeSpace)) {
+-      indop = fd->newIndirectOp(op,addr,size,PcodeOp::indirect_store);
+-      indop->getIn(0)->setActiveHeritage();
+-      indop->getOut()->setActiveHeritage();
+-      write.push_back(indop->getOut());
++  for(OpCode opc : {CPUI_STORE,CPUI_CALLOTHER}) {
++    iterend = fd->endOp(opc);
++    for(iter=fd->beginOp(opc);iter!=iterend;++iter) {
++      op = *iter;
++      if (op->isDead() || op->getMemoryAccess() != CPUI_STORE) continue;
++      AddrSpace *storeSpace = op->getMemorySpace();
++      if ((container == storeSpace && op->usesSpacebasePtr()) ||
++	  (spc == storeSpace)) {
++        indop = fd->newIndirectOp(op,addr,size,PcodeOp::indirect_store);
++        indop->getIn(0)->setActiveHeritage();
++        indop->getOut()->setActiveHeritage();
++        write.push_back(indop->getOut());
++      }
+     }
+   }
+ }
+diff --git a/src/decompiler/heritage.hh b/src/decompiler/heritage.hh
+index 5693c3c..f83ae3e 100644
+--- a/src/decompiler/heritage.hh
++++ b/src/decompiler/heritage.hh
+@@ -170,7 +170,7 @@ public:
+   int4 getStep(void) const { return step; }		///< Get the calculated step associated with the range (or 0)
+   bool mayAlias(const Address &addr,int4 size) const;	///< Can this access overlap the given storage bytes
+   bool isRangeLocked(void) const { return (analysisState == 2); }	///< Return \b true if the range is fully determined
+-  bool isValid(OpCode opc) const { return (!op->isDead() && op->code() == opc); }	///< Return \b true if the record still describes an active LOAD
++  bool isValid(OpCode opc) const { return (!op->isDead() && op->getMemoryAccess() == opc); }	///< Does the record still describe the memory access?
+ };
+ 
+ /// \brief Manage the construction of Static Single Assignment (SSA) form
+diff --git a/src/decompiler/merge.cc b/src/decompiler/merge.cc
+index 36b5cf2..09d8320 100644
+--- a/src/decompiler/merge.cc
++++ b/src/decompiler/merge.cc
+@@ -78,7 +78,7 @@ void StackAffectingOps::populate(void)
+ bool StackAffectingOps::affectsTest(PcodeOp *op,Varnode *vn) const
+ 
+ {
+-  if (op->code() == CPUI_STORE) {
++  if (op->getMemoryAccess() == CPUI_STORE) {
+     const LoadGuard *loadGuard = data.getStoreGuard(op);
+     if (loadGuard == (const LoadGuard *)0)
+       return true;
+diff --git a/src/decompiler/op.hh b/src/decompiler/op.hh
+index a6a793d..61e6352 100644
+--- a/src/decompiler/op.hh
++++ b/src/decompiler/op.hh
+@@ -234,6 +234,8 @@ public:
+   bool isMoveable(const PcodeOp *point) const;	///< Can \b this be moved to after \e point, without disturbing data-flow
+   TypeOp *getOpcode(void) const { return opcode; } ///< Get the opcode for this op
+   OpCode code(void) const { return opcode->getOpcode(); } ///< Get the opcode id (enum) for this op
++  OpCode getMemoryAccess(void) const { return opcode->getMemoryAccess(this); } ///< Get the derived LOAD/STORE effect
++  AddrSpace *getMemorySpace(void) const { return opcode->getMemorySpace(this); } ///< Get the memory effect's address space
+   bool isCommutative(void) const { return ((flags & PcodeOp::commutative)!=0); } ///< Return \b true if inputs commute
+   uintb collapse(bool &markedInput) const;	///< Calculate the constant output produced by this op
+   uintb executeSimple(uintb *in,bool &evalError) const;		///< Execute \b this operation on the given input values
 diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
 index c163ae1..24b8c41 100644
 --- a/src/decompiler/printc.cc
@@ -199,9 +397,18 @@ index c163ae1..24b8c41 100644
    if (display == 0) {	// Emit using functional syntax
      string nm = op->getOpcode()->getOperatorName(op);
 diff --git a/src/decompiler/ruleaction.cc b/src/decompiler/ruleaction.cc
-index b5fc472..3226895 100644
+index b5fc472..9438684 100644
 --- a/src/decompiler/ruleaction.cc
 +++ b/src/decompiler/ruleaction.cc
+@@ -3219,7 +3219,7 @@ int4 RuleIndirectCollapse::applyOp(PcodeOp *op,Funcdata &data)
+ 	return 0;
+     }
+     else if (indop->usesSpacebasePtr()) {
+-      if (indop->code() == CPUI_STORE) {
++      if (indop->getMemoryAccess() == CPUI_STORE) {
+ 	const LoadGuard *guard = data.getStoreGuard(indop);
+ 	if (guard != (const LoadGuard *)0) {
+ 	  if (guard->mayAlias(op->getOut()->getAddr(),op->getOut()->getSize()))
 @@ -4204,7 +4204,7 @@ AddrSpace *RuleLoadVarnode::correctSpacebase(Architecture *glb,Varnode *vn,AddrS
    return assoc;
  }
@@ -289,18 +496,20 @@ index 5b8c80d..59e494b 100644
    virtual Rule *clone(const ActionGroupList &grouplist) const {
      if (!grouplist.contains(getGroup())) return (Rule *)0;
 diff --git a/src/decompiler/typeop.cc b/src/decompiler/typeop.cc
-index c688db2..fc7da54 100644
+index c688db2..f2259e0 100644
 --- a/src/decompiler/typeop.cc
 +++ b/src/decompiler/typeop.cc
-@@ -210,10 +210,20 @@ Datatype *TypeOp::propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz)
+@@ -210,10 +210,22 @@ Datatype *TypeOp::propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz)
    if (dt->getMetatype() != TYPE_PTR)
      return (Datatype *)0;
    Datatype *ptrto = ((TypePointer *)dt)->getPtrTo();
 +  uint4 qualifiers = ptrto->getQualifiers();
-+  while(ptrto->getSize() != sz && (ptrto->getMetatype() == TYPE_STRUCT || ptrto->getMetatype() == TYPE_ARRAY)) {
++  while(ptrto->getSize() != sz && (ptrto->getMetatype() == TYPE_STRUCT || ptrto->getMetatype() == TYPE_ARRAY ||
++      (ptrto->getMetatype() == TYPE_UNION && ptrto->numDepend() == 1))) {
 +    int8 offset = 0;
-+    Datatype *component = ptrto->getSubType(0,&offset);
-+    if (component == (Datatype *)0 || offset != 0) break;
++    Datatype *component = ptrto->getMetatype() == TYPE_UNION ? ptrto->getDepend(0) : ptrto->getSubType(0,&offset);
++    if (component == (Datatype *)0 || offset != 0 ||
++        (ptrto->getMetatype() == TYPE_UNION && component->getSize() < sz)) break;
 +    ptrto = component;
 +    qualifiers |= ptrto->getQualifiers();
 +  }
@@ -314,7 +523,7 @@ index c688db2..fc7da54 100644
    // If we reach here, there is a size mismatch between the pointer data-type and the dereferenced value.
    // We only propagate (partial) enumerations in this case.
    if (dt->isPointerRel()) {
-@@ -228,9 +238,37 @@ Datatype *TypeOp::propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz)
+@@ -228,9 +240,50 @@ Datatype *TypeOp::propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz)
    return (Datatype *)0;
  }
  
@@ -322,9 +531,10 @@ index c688db2..fc7da54 100644
 +
 +{
 +  uint4 qualifiers = type->getQualifiers();
-+  while(type->getMetatype() == TYPE_STRUCT || type->getMetatype() == TYPE_ARRAY) {
++  while(type->getMetatype() == TYPE_STRUCT || type->getMetatype() == TYPE_ARRAY ||
++      (type->getMetatype() == TYPE_UNION && type->numDepend() == 1)) {
 +    int8 offset = 0;
-+    Datatype *component = type->getSubType(0,&offset);
++    Datatype *component = type->getMetatype() == TYPE_UNION ? type->getDepend(0) : type->getSubType(0,&offset);
 +    if (component == (Datatype *)0 || offset != 0 || component->getSize() < size) break;
 +    qualifiers |= component->getQualifiers();
 +    type = component;
@@ -349,10 +559,22 @@ index c688db2..fc7da54 100644
 +  return type;
 +}
 +
++OpCode TypeOp::getMemoryAccess(const PcodeOp *op) const
++
++{
++  return opcode == CPUI_LOAD || opcode == CPUI_STORE ? opcode : CPUI_MAX;
++}
++
++AddrSpace *TypeOp::getMemorySpace(const PcodeOp *op) const
++
++{
++  return getMemoryAccess(op) == CPUI_MAX ? (AddrSpace *)0 : op->getIn(0)->getSpaceFromConst();
++}
++
  TypeOp::TypeOp(TypeFactory *t,OpCode opc,const string &n)
  
  {
-@@ -475,7 +513,7 @@ Datatype *TypeOpLoad::getOutputToken(const PcodeOp *op,CastStrategy *castStrateg
+@@ -475,7 +528,7 @@ Datatype *TypeOpLoad::getOutputToken(const PcodeOp *op,CastStrategy *castStrateg
  {
    Datatype *ct = op->getIn(1)->getHighTypeReadFacing(op);
    if ((ct->getMetatype() == TYPE_PTR)&&(((TypePointer *)ct)->getPtrTo()->getSize() == op->getOut()->getSize()))
@@ -361,7 +583,7 @@ index c688db2..fc7da54 100644
    //  return TypeOp::getOutputToken(op);
    // The input to the load is not a pointer or (more likely)
    // points to something of a different size than the output
-@@ -496,7 +534,7 @@ Datatype *TypeOpLoad::propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,
+@@ -496,7 +549,7 @@ Datatype *TypeOpLoad::propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,
      newtype = propagateToPointer(tlst,alttype,outvn->getSize(),spc->getWordSize());
    }
    else
@@ -370,7 +592,33 @@ index c688db2..fc7da54 100644
    return newtype;
  }
  
-@@ -874,6 +912,17 @@ Datatype *TypeOpCallother::getOutputLocal(const PcodeOp *op) const
+@@ -817,6 +870,25 @@ TypeOpCallother::TypeOpCallother(TypeFactory *t) : TypeOp(t,CPUI_CALLOTHER,"sysc
+   behave = new OpBehavior(CPUI_CALLOTHER,false,true); // Dummy behavior
+ }
+ 
++OpCode TypeOpCallother::getMemoryAccess(const PcodeOp *op) const
++
++{
++  if (op->numInput() < 2 || op->getIn(1)->isAnnotation()) return CPUI_MAX;
++  UserPcodeOp *userop = tlst->getArch()->userops.getOp(op->getIn(0)->getOffset());
++  if (userop == (UserPcodeOp *)0) return CPUI_MAX;
++  if (userop->getType() == UserPcodeOp::volatile_read) return CPUI_LOAD;
++  if (userop->getType() == UserPcodeOp::volatile_write) return CPUI_STORE;
++  return CPUI_MAX;
++}
++
++AddrSpace *TypeOpCallother::getMemorySpace(const PcodeOp *op) const
++
++{
++  if (getMemoryAccess(op) == CPUI_MAX) return (AddrSpace *)0;
++  VolatileOp *userop = (VolatileOp *)tlst->getArch()->userops.getOp(op->getIn(0)->getOffset());
++  return userop->getMemorySpace(op);
++}
++
+ void TypeOpCallother::printRaw(ostream &s,const PcodeOp *op)
+ 
+ {
+@@ -874,6 +946,17 @@ Datatype *TypeOpCallother::getOutputLocal(const PcodeOp *op) const
    return TypeOp::getOutputLocal(op);
  }
  
@@ -388,7 +636,7 @@ index c688db2..fc7da54 100644
  TypeOpReturn::TypeOpReturn(TypeFactory *t) : TypeOp(t,CPUI_RETURN,"return")
  
  {
-@@ -1233,13 +1282,14 @@ Datatype *TypeOpIntAdd::propagateType(Datatype *alttype,PcodeOp *op,Varnode *inv
+@@ -1233,13 +1316,14 @@ Datatype *TypeOpIntAdd::propagateType(Datatype *alttype,PcodeOp *op,Varnode *inv
  /// \param typegrp is the TypeFactory for constructing the transformed Datatype
  /// \param op is the ADD operation
  /// \param inslot is the edge to propagate along
@@ -405,7 +653,7 @@ index c688db2..fc7da54 100644
    if (command == 2) return (Datatype *)0; // Doesn't look like a good pointer add
    TypePointer *parent = (TypePointer *)0;
    int8 parentOff;
-@@ -1247,9 +1297,14 @@ Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegr
+@@ -1247,9 +1331,14 @@ Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegr
      int8 typeOffset = AddrSpace::addressToByteInt(offset,pointer->getWordSize());
      bool allowWrap = (op->code() != CPUI_PTRSUB);
      do {
@@ -420,7 +668,7 @@ index c688db2..fc7da54 100644
      } while(typeOffset != 0);
    }
    if (parent != (TypePointer *)0) {
-@@ -1286,8 +1341,9 @@ Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegr
+@@ -1286,8 +1375,9 @@ Datatype *TypeOpIntAdd::propagateAddIn2Out(Datatype *alttype,TypeFactory *typegr
  /// \param op is the PcodeOp propagating the data-type
  /// \param slot is the input edge being propagated
  /// \param sz is the size of the data-type being pointed to
@@ -431,7 +679,7 @@ index c688db2..fc7da54 100644
  
  {
    if (op->code() == CPUI_PTRADD) {
-@@ -1329,7 +1385,8 @@ int4 TypeOpIntAdd::propagateAddPointer(uintb &off,PcodeOp *op,int4 slot,int4 sz)
+@@ -1329,7 +1419,8 @@ int4 TypeOpIntAdd::propagateAddPointer(uintb &off,PcodeOp *op,int4 slot,int4 sz)
  	return 3;
        return 2;
      }
@@ -441,7 +689,7 @@ index c688db2..fc7da54 100644
        return 2;
      off = othervn->getOffset();
      return (off == 0) ? 0 : 1;
-@@ -2343,6 +2400,17 @@ TypeOpCast::TypeOpCast(TypeFactory *t) : TypeOp(t,CPUI_CAST,"(cast)")
+@@ -2343,6 +2434,17 @@ TypeOpCast::TypeOpCast(TypeFactory *t) : TypeOp(t,CPUI_CAST,"(cast)")
    behave = new OpBehavior(CPUI_CAST,false,true); // Dummy behavior
  }
  
@@ -459,7 +707,7 @@ index c688db2..fc7da54 100644
  void TypeOpCast::printRaw(ostream &s,const PcodeOp *op)
  
  {
-@@ -2485,8 +2553,11 @@ Datatype *TypeOpPtrsub::getOutputToken(const PcodeOp *op,CastStrategy *castStrat
+@@ -2485,8 +2587,11 @@ Datatype *TypeOpPtrsub::getOutputToken(const PcodeOp *op,CastStrategy *castStrat
      int8 unusedOffset;
      TypePointer *unusedParent;
      Datatype *rettype = ptype->downChain(offset,unusedParent,unusedOffset,false,*tlst);
@@ -474,10 +722,19 @@ index c688db2..fc7da54 100644
      return tlst->getTypePointer(op->getOut()->getSize(), rettype, ptype->getWordSize());
    }
 diff --git a/src/decompiler/typeop.hh b/src/decompiler/typeop.hh
-index f919d6b..9b5e3e2 100644
+index f919d6b..b0f8249 100644
 --- a/src/decompiler/typeop.hh
 +++ b/src/decompiler/typeop.hh
-@@ -193,6 +193,8 @@ public:
+@@ -69,6 +69,8 @@ public:
+   virtual ~TypeOp(void);				///< Destructor
+   const string &getName(void) const { return name; }	///< Get the display name of the op-code
+   OpCode getOpcode(void) const { return opcode; }	///< Get the op-code value
++  virtual OpCode getMemoryAccess(const PcodeOp *op) const; ///< LOAD/STORE memory effect, or CPUI_MAX
++  virtual AddrSpace *getMemorySpace(const PcodeOp *op) const; ///< Address space of the memory effect
+   uint4 getFlags(void) const { return opflags; }	///< Get the properties associated with the op-code
+   OpBehavior *getBehavior(void) const { return behave; }	///< Get the behavior associated with the op-code
+ 
+@@ -193,6 +195,8 @@ public:
    static OpCode floatSignManipulation(PcodeOp *op);
    static Datatype *propagateToPointer(TypeFactory *t,Datatype *dt,int4 sz,int4 wordsz);
    static Datatype *propagateFromPointer(TypeFactory *t,Datatype *dt,int4 sz);
@@ -486,7 +743,14 @@ index f919d6b..9b5e3e2 100644
  };
  
  // Major classes of operations
-@@ -341,6 +343,7 @@ public:
+@@ -336,11 +340,14 @@ public:
+ class TypeOpCallother : public TypeOp {
+ public:
+   TypeOpCallother(TypeFactory *t);			///< Constructor
++  virtual OpCode getMemoryAccess(const PcodeOp *op) const;
++  virtual AddrSpace *getMemorySpace(const PcodeOp *op) const;
+   virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opCallother(op); }
+   virtual void printRaw(ostream &s,const PcodeOp *op);
    virtual string getOperatorName(const PcodeOp *op) const;
    virtual Datatype *getInputLocal(const PcodeOp *op,int4 slot) const;
    virtual Datatype *getOutputLocal(const PcodeOp *op) const;
@@ -494,7 +758,7 @@ index f919d6b..9b5e3e2 100644
  };
  
  /// \brief Information about the RETURN op-code
-@@ -442,8 +445,8 @@ public:
+@@ -442,8 +449,8 @@ public:
    virtual Datatype *getOutputToken(const PcodeOp *op,CastStrategy *castStrategy) const;
    virtual Datatype *propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,Varnode *outvn,
  				  int4 inslot,int4 outslot);
@@ -505,7 +769,7 @@ index f919d6b..9b5e3e2 100644
  };
  
  /// \brief Information about the INT_SUB op-code
-@@ -817,6 +820,7 @@ public:
+@@ -817,6 +824,7 @@ public:
  class TypeOpCast : public TypeOp {
  public:
    TypeOpCast(TypeFactory *t);			///< Constructor
@@ -514,13 +778,19 @@ index f919d6b..9b5e3e2 100644
  				// So no input and output requirements
    virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opCast(op); }
 diff --git a/src/decompiler/userop.cc b/src/decompiler/userop.cc
-index c9074bf..f685c78 100644
+index c9074bf..17fbe51 100644
 --- a/src/decompiler/userop.cc
 +++ b/src/decompiler/userop.cc
-@@ -118,6 +118,23 @@ string VolatileOp::appendSize(const string &base,int4 size)
+@@ -118,6 +118,29 @@ string VolatileOp::appendSize(const string &base,int4 size)
    return s.str();
  }
  
++AddrSpace *VolatileOp::getMemorySpace(const PcodeOp *op) const
++
++{
++  return glb->getSpace(op->getIn(op->numInput()-1)->getOffset());
++}
++
 +Datatype *VolatileOp::getMemoryType(const PcodeOp *op) const
 +
 +{
@@ -534,14 +804,14 @@ index c9074bf..f685c78 100644
 +  if (slot != 1 || op->getIn(1)->isAnnotation()) return (Datatype *)0;
 +  Datatype *memory = getMemoryType(op);
 +  if (memory == (Datatype *)0) return (Datatype *)0;
-+  AddrSpace *space = glb->getSpace(op->getIn(op->numInput()-1)->getOffset());
++  AddrSpace *space = getMemorySpace(op);
 +  return glb->types->getTypePointer(op->getIn(1)->getSize(),memory,space->getWordSize());
 +}
 +
  string VolatileReadOp::getOperatorName(const PcodeOp *op) const
  
  {
-@@ -128,6 +145,8 @@ string VolatileReadOp::getOperatorName(const PcodeOp *op) const
+@@ -128,6 +151,8 @@ string VolatileReadOp::getOperatorName(const PcodeOp *op) const
  Datatype *VolatileReadOp::getOutputLocal(const PcodeOp *op) const
  
  {
@@ -550,7 +820,7 @@ index c9074bf..f685c78 100644
    if (!op->doesSpecialPropagation())
      return (Datatype *)0;
    const Address &addr ( op->getIn(1)->getAddr() ); // Address of volatile memory
-@@ -159,6 +178,10 @@ string VolatileWriteOp::getOperatorName(const PcodeOp *op) const
+@@ -159,6 +184,10 @@ string VolatileWriteOp::getOperatorName(const PcodeOp *op) const
  Datatype *VolatileWriteOp::getInputLocal(const PcodeOp *op,int4 slot) const
  
  {
@@ -562,19 +832,20 @@ index c9074bf..f685c78 100644
      return (Datatype *)0;
    const Address &addr ( op->getIn(1)->getAddr() ); // Address of volatile memory
 diff --git a/src/decompiler/userop.hh b/src/decompiler/userop.hh
-index 6be1aba..af56e42 100644
+index 6be1aba..f3d7a5a 100644
 --- a/src/decompiler/userop.hh
 +++ b/src/decompiler/userop.hh
-@@ -177,6 +177,8 @@ protected:
+@@ -177,6 +177,9 @@ protected:
  public:
    VolatileOp(const string &nm,Architecture *g,uint4 tp,int4 ind)
      : UserPcodeOp(nm,g,tp,ind) { }				///< Constructor
 +  Datatype *getMemoryType(const PcodeOp *op) const; ///< Effective type of an indirect volatile access
++  AddrSpace *getMemorySpace(const PcodeOp *op) const; ///< Decode the indirect access's trailing space index
 +  virtual Datatype *getInputLocal(const PcodeOp *op,int4 slot) const;
    virtual void decode(Decoder &decoder) {}			///< Currently volatile ops only need their name
  };
  
-@@ -184,7 +186,7 @@ public:
+@@ -184,7 +187,7 @@ public:
  ///
  /// This CALLOTHER p-code operation takes as its input parameter, after the constant id,
  /// a reference Varnode to the memory being read. The output returned by this operation
@@ -583,7 +854,7 @@ index 6be1aba..af56e42 100644
  class VolatileReadOp : public VolatileOp {
  public:
    VolatileReadOp(const string &nm,Architecture *g,bool functional)
-@@ -200,6 +202,7 @@ public:
+@@ -200,6 +203,7 @@ public:
  ///   - Constant id
  ///   - Reference Varnode to the memory being written
  ///   - The Varnode value being written to the memory
@@ -592,21 +863,22 @@ index 6be1aba..af56e42 100644
  public:
    VolatileWriteOp(const string &nm,Architecture *g,bool functional)
 diff --git a/src/unittests/testqualifiers.cc b/src/unittests/testqualifiers.cc
-index dc74a63..9885459 100644
+index dc74a63..f1b0864 100644
 --- a/src/unittests/testqualifiers.cc
 +++ b/src/unittests/testqualifiers.cc
-@@ -1,7 +1,10 @@
+@@ -1,7 +1,11 @@
  #include "architecture.hh"
 +#include "coreaction.hh"
 +#include "funcdata.hh"
  #include "libdecomp.hh"
  #include "printc.hh"
++#include "ruleaction.hh"
  #include "test.hh"
 +#include "userop.hh"
  
  namespace ghidra {
  
-@@ -259,4 +262,272 @@ TEST(qualified_type_incomplete_completion) {
+@@ -259,4 +263,498 @@ TEST(qualified_type_incomplete_completion) {
    ASSERT_EQUALS(unionAlias->getDepend(0),word);
  }
  
@@ -648,6 +920,7 @@ index dc74a63..9885459 100644
 +      if (arch->userops.getOp(op->getIn(0)->getOffset())->getType() != type) continue;
 +      ASSERT_EQUALS(!op->getIn(1)->isAnnotation(),indirect);
 +      if (indirect) {
++        ASSERT_EQUALS(op->getMemoryAccess(),type == UserPcodeOp::volatile_read ? CPUI_LOAD : CPUI_STORE);
 +        ASSERT_EQUALS(op->numInput(),type == UserPcodeOp::volatile_read ? 3 : 4);
 +        ASSERT_EQUALS(op->getIn(op->numInput()-1)->getOffset(),arch->getDefaultDataSpace()->getIndex());
 +        ASSERT(op->getIn(1)->getType()->getMetatype() == TYPE_PTR);
@@ -877,5 +1150,230 @@ index dc74a63..9885459 100644
 +  ASSERT_EQUALS(valueType->getQualifiers(),0);
 +  ASSERT(text.find("volatile",text.find("volatile")+1) == string::npos);
 +}
++
++static set<PcodeOp *> returnedDefinitions(Funcdata *fd) {
++  vector<Varnode *> worklist;
++  set<PcodeOp *> definitions;
++  for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (!op->isDead() && op->code() == CPUI_RETURN && op->numInput() == 2)
++      worklist.push_back(op->getIn(1));
++  }
++  while(!worklist.empty()) {
++    Varnode *value = worklist.back();
++    worklist.pop_back();
++    if (!value->isWritten()) continue;
++    PcodeOp *op = value->getDef();
++    if (!definitions.insert(op).second) continue;
++    for(int4 i=0;i<op->numInput();++i)
++      worklist.push_back(op->getIn(i));
++  }
++  return definitions;
++}
++
++static set<uintb> returnedStoreOffsets(Funcdata *fd,PcodeOp *effect) {
++  set<uintb> offsets;
++  for(PcodeOp *op : returnedDefinitions(fd)) {
++    if (op->code() == CPUI_INDIRECT && PcodeOp::getOpFromConst(op->getIn(1)->getAddr()) == effect &&
++        op->getOut()->getSpace() == fd->getArch()->getStackSpace() && op->getOut()->getSize() == 4)
++      offsets.insert(op->getOut()->getOffset());
++  }
++  return offsets;
++}
++
++static PcodeOp *memoryAccessAt(QualifiedAccessEnvironment &env,uintb address,OpCode access) {
++  PcodeOp *result = (PcodeOp *)0;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->getAddr().getOffset() != address || op->getMemoryAccess() != access) continue;
++    ASSERT(result == (PcodeOp *)0);
++    result = op;
++  }
++  ASSERT(result != (PcodeOp *)0);
++  return result;
++}
++
++static void checkStoreDependencies(bool convert) {
++  QualifiedAccessEnvironment env("558bec83ec10c745f401000000c74524020000008d5df4837d080075038d5d24c703030000008b45f4034524c9c3","x86:LE:32:default:gcc");
++  env.analyze();
++  PcodeOp *store = memoryAccessAt(env,0x1020,CPUI_STORE);
++  ASSERT_EQUALS(store->code(),CPUI_STORE);
++  ASSERT_EQUALS(store->getIn(2)->getOffset(),3);
++  const LoadGuard *guard = env.fd->getStoreGuard(store);
++  ASSERT(guard != (const LoadGuard *)0);
++  ASSERT(guard->isValid(CPUI_STORE));
++  ASSERT(store->usesSpacebasePtr());
++  vector<PcodeOp *> indirects;
++  for(PcodeOp *op : returnedDefinitions(env.fd)) {
++    if (op->code() != CPUI_INDIRECT || PcodeOp::getOpFromConst(op->getIn(1)->getAddr()) != store) continue;
++    ASSERT(guard->mayAlias(op->getOut()->getAddr(),op->getOut()->getSize()));
++    ASSERT(!op->getOut()->hasNoLocalAlias());
++    indirects.push_back(op);
++  }
++  ASSERT_EQUALS(indirects.size(),2);
++  Varnode *pointer = store->getIn(1);
++  Varnode *value = store->getIn(2);
++  RuleIndirectCollapse rule("base");
++  for(PcodeOp *op : indirects)
++    ASSERT_EQUALS(rule.applyOp(op,*env.fd),0);
++  if (convert) {
++    env.fd->replaceVolatile(store);
++    ASSERT_EQUALS(store->code(),CPUI_CALLOTHER);
++    ASSERT_EQUALS(env.arch->userops.getOp(store->getIn(0)->getOffset())->getType(),UserPcodeOp::volatile_write);
++    ASSERT_EQUALS(store->getIn(1),pointer);
++    ASSERT_EQUALS(store->getIn(2),value);
++    ASSERT(store->usesSpacebasePtr());
++  }
++  ASSERT_EQUALS(store->getMemoryAccess(),CPUI_STORE);
++  ASSERT_EQUALS(store->getMemorySpace(),env.arch->getDefaultDataSpace());
++  ASSERT(guard->isValid(CPUI_STORE));
++  ASSERT(!guard->isValid(CPUI_LOAD));
++  for(PcodeOp *op : indirects)
++    ASSERT_EQUALS(rule.applyOp(op,*env.fd),0);
++  set<uintb> offsets = returnedStoreOffsets(env.fd,store);
++  ASSERT_EQUALS(offsets.size(),2);
++  ASSERT_EQUALS(offsets.count(0xfffffff0),1);
++  ASSERT_EQUALS(offsets.count(0x20),1);
++}
++
++TEST(qualified_ordinary_store_dependencies) { checkStoreDependencies(false); }
++TEST(qualified_volatile_store_dependencies) { checkStoreDependencies(true); }
++
++TEST(qualified_volatile_store_merge_interference) {
++  // Preserve a decoded external read across the conditional stack write and its returned sum.
++  QualifiedAccessEnvironment env("558bec83ec10c745f401000000c74524020000008b7d0c8b378d5df4837d080075038d5d24c703030000008b45f403452401f0c9c3","x86:LE:32:default:gcc");
++  env.analyze();
++  PcodeOp *load = memoryAccessAt(env,0x1017,CPUI_LOAD);
++  PcodeOp *store = memoryAccessAt(env,0x1025,CPUI_STORE);
++  const LoadGuard *guard = env.fd->getStoreGuard(store);
++  ASSERT(guard != (const LoadGuard *)0);
++  Varnode *aliased = (Varnode *)0;
++  for(PcodeOp *op : returnedDefinitions(env.fd)) {
++    if (op->code() == CPUI_INDIRECT && op->getOut()->getSpace() == env.arch->getStackSpace() &&
++        op->getOut()->getOffset() == 0xfffffff0 && PcodeOp::getOpFromConst(op->getIn(1)->getAddr()) == store)
++      aliased = op->getOut();
++  }
++  ASSERT(aliased != (Varnode *)0);
++  ASSERT(guard->mayAlias(aliased->getAddr(),aliased->getSize()));
++  Varnode *outside = env.fd->newVarnode(4,Address(env.arch->getStackSpace(),0x100));
++  ASSERT(!guard->mayAlias(outside->getAddr(),outside->getSize()));
++  Cover *crossing = load->getOut()->getCover();
++  ASSERT(crossing->contain(store,2));
++  ASSERT_EQUALS(crossing->getCoverBlock(store->getParent()->getIndex()).boundary(store),0);
++  for(int4 converted=0;converted<2;++converted) {
++    if (converted != 0)
++      env.fd->replaceVolatile(store);
++    StackAffectingOps affecting(*env.fd);
++    affecting.populate();
++    ASSERT(crossing->intersect(affecting,aliased));
++    ASSERT(!crossing->intersect(affecting,outside));
++  }
++}
++
++TEST(qualified_volatile_read_guard_extent) {
++  QualifiedAccessEnvironment env("558bec83ec10c745f401000000c74524020000008d5df4837d080075038d5d240fb603c9c3","x86:LE:32:default:gcc");
++  env.analyze();
++  PcodeOp *load = memoryAccessAt(env,0x1020,CPUI_LOAD);
++  ASSERT_EQUALS(load->getOut()->getSize(),1);
++  const LoadGuard *guard = (const LoadGuard *)0;
++  for(const LoadGuard &candidate : env.fd->getLoadGuards()) {
++    if (candidate.getOp() == load)
++      guard = &candidate;
++  }
++  ASSERT(guard != (const LoadGuard *)0);
++  AddrSpace *stack = env.arch->getStackSpace();
++  ASSERT(guard->isValid(CPUI_LOAD));
++  ASSERT(!guard->mayAlias(Address(stack,0x21),1));
++  env.fd->replaceVolatile(load);
++  ASSERT(guard->isValid(CPUI_LOAD));
++  ASSERT(!guard->isValid(CPUI_STORE));
++  ASSERT(guard->mayAlias(Address(stack,0xfffffff0),1));
++  ASSERT(guard->mayAlias(Address(stack,0x20),1));
++  ASSERT(!guard->mayAlias(Address(stack,0x21),1));
++}
++
++static void checkQualifiedStackStore(bool negativeFirst) {
++  string pointerChoice = negativeFirst ? "8d5df4837d080075038d5d24" : "8d5d24837d080075038d5df4";
++  QualifiedAccessEnvironment env("558bec83ec10c745f401000000c7452402000000" + pointerChoice + "895df88b5df8c703030000008b45f4034524c9c3","x86:LE:32:default:gcc");
++  TypeFactory *factory = env.arch->types;
++  Datatype *word = factory->getQualifiedType(factory->getBase(4,TYPE_UINT),Datatype::qualifier_volatile);
++  TypePointer *pointer = factory->getTypePointer(4,word,1);
++  Scope *scope = env.fd->getScopeLocal();
++  Symbol *symbol = scope->addSymbol("selected",pointer,Address(env.arch->getStackSpace(),0xfffffff4),Address())->getSymbol();
++  scope->setAttribute(symbol,Varnode::typelock | Varnode::namelock);
++  env.analyze();
++  PcodeOp *store = memoryAccessAt(env,0x1026,CPUI_STORE);
++  ASSERT_EQUALS(store->code(),CPUI_CALLOTHER);
++  ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_write),1);
++  ASSERT_EQUALS(store->getIn(2)->getOffset(),3);
++  set<uintb> offsets = returnedStoreOffsets(env.fd,store);
++  ASSERT_EQUALS(offsets.size(),2);
++  ASSERT_EQUALS(offsets.count(0xfffffff0),1);
++  ASSERT_EQUALS(offsets.count(0x20),1);
++}
++
++TEST(qualified_volatile_stack_store_negative) { checkQualifiedStackStore(true); }
++TEST(qualified_volatile_stack_store_positive) { checkQualifiedStackStore(false); }
++
++static TypeUnion *singleMemberAccessUnion(TypeFactory *factory,bool qualified) {
++  Datatype *word = factory->getQualifiedType(factory->getBase(2,TYPE_UINT),qualified ? Datatype::qualifier_volatile : 0);
++  TypeUnion *record = factory->getTypeUnion("SingleMemberAccessUnion");
++  factory->setFields({TypeField(0,0,"value",word)},record,2,2,0);
++  ASSERT_EQUALS(record->getDepend(0),word);
++  ASSERT_EQUALS(record->getSize(),word->getSize());
++  return record;
++}
++
++TEST(qualified_volatile_union_access_qualifiers) {
++  QualifiedAccessEnvironment env("0fb7070fb707c3");
++  TypeUnion *record = singleMemberAccessUnion(env.arch->types,true);
++  ASSERT((TypeOp::getAccessQualifiers(record,2) & Datatype::qualifier_volatile) != 0);
++}
++
++static void checkSingleMemberUnionReads(bool qualified) {
++  QualifiedAccessEnvironment env("0fb7070fb707c3");
++  TypeUnion *record = singleMemberAccessUnion(env.arch->types,qualified);
++  env.setInput(env.arch->types->getTypePointer(8,record,1));
++  env.analyze();
++  ASSERT_EQUALS(env.effects(UserPcodeOp::volatile_read),qualified ? 2 : 0);
++  ASSERT_EQUALS(env.loads(),qualified ? 0 : 1);
++  set<uintb> reads = env.readOffsets(qualified);
++  ASSERT_EQUALS(reads.count(0x1003),1);
++  ASSERT_EQUALS(reads.count(0x1000),qualified ? 1 : 0);
++  ASSERT_EQUALS(returnedDefinitions(env.fd).count(memoryAccessAt(env,0x1003,CPUI_LOAD)),1);
++}
++
++TEST(qualified_ordinary_union_reads) { checkSingleMemberUnionReads(false); }
++TEST(qualified_volatile_union_reads) { checkSingleMemberUnionReads(true); }
++
++static void checkLoadCrossingStore(bool convert) {
++  QualifiedAccessEnvironment env("8b07c7070100000083c002c3");
++  env.setInput(env.arch->types->getTypePointer(8,env.arch->types->getBase(4,TYPE_UINT),1));
++  env.analyze();
++  PcodeOp *load = memoryAccessAt(env,0x1000,CPUI_LOAD);
++  PcodeOp *store = memoryAccessAt(env,0x1002,CPUI_STORE);
++  Varnode *loaded = load->getOut();
++  ASSERT_EQUALS(load->code(),CPUI_LOAD);
++  ASSERT_EQUALS(store->code(),CPUI_STORE);
++  ASSERT_EQUALS(load->getIn(1),store->getIn(1));
++  ASSERT(loaded->getCover()->contain(store,2));
++  if (convert)
++    env.fd->replaceVolatile(store);
++  loaded->clearImplied();
++  loaded->clearExplicit();
++  ActionMarkImplied action("base");
++  action.apply(*env.fd);
++  ASSERT(loaded->isExplicit());
++  ASSERT(!loaded->isImplied());
++  ASSERT_EQUALS(returnedDefinitions(env.fd).count(load),1);
++  string text = env.print();
++  size_t read = text.find("*input");
++  size_t write = text.find("*input = 1;");
++  ASSERT(read != string::npos && write != string::npos && read < write);
++  ASSERT(write < text.find("return"));
++}
++
++TEST(qualified_ordinary_load_crossing_store) { checkLoadCrossingStore(false); }
++TEST(qualified_ordinary_load_crossing_volatile_store) { checkLoadCrossingStore(true); }
 +
  } // End namespace ghidra
