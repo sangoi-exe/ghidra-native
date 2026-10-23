@@ -133,7 +133,7 @@ class PatchPreparationTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/compile_sleigh.py'), os.environ['SLEIGHC'], str(self.root / 'src/Processors/x86'), str(Path(self.directory.name) / 'sleigh-x86.stamp')], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         languages = self.root / 'src/Processors/x86/data/languages'
-        for name in ['x86.sla', 'x86-64.sla']:
+        for name in ['x86.sla', 'x86-64.sla', 'x86-16-protected.sla']:
             self.assertGreater((languages / name).stat().st_size, 0)
         marker = (self.root / 'patch.done').read_bytes()
         result = self.run_preparation()

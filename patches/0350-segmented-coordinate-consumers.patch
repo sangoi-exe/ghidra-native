@@ -1,0 +1,203 @@
+--- a/src/decompiler/architecture.cc
++++ b/src/decompiler/architecture.cc
+@@ -665,8 +665,10 @@
+ {
+   if (stackSegment.space != (AddrSpace *)0) {
+     SegmentOp *segdef = userops.getSegmentOp(getStackSpace()->getContain()->getIndex());
++    bool narrowStack = segdef != (SegmentOp *)0 && segdef->getInnerSize() == 4 &&
++        segdef->getBaseSize() == 2 && segdef->getSpace()->getAddrSize() == 6 && getStackSpace()->getAddrSize() == 2;
+     if (segdef == (SegmentOp *)0 || segdef->getBaseSize() != stackSegment.size ||
+-        segdef->getInnerSize() != getStackSpace()->getAddrSize())
++        (segdef->getInnerSize() != getStackSpace()->getAddrSize() && !narrowStack))
+       throw LowlevelError("Stackpointer registers do not match the stack space's segment operation");
+   }
+   int4 sz = userops.numSegmentOps();
+@@ -710,7 +712,7 @@
+       defPos = i;
+     SegmentOp *segOp = getSegmentOp(spc);
+     if (segOp != (SegmentOp *)0) {
+-      int4 val = segOp->getInnerSize();
++      int4 val = types->getSizeOfPointer();
+       markNearPointers(spc, val);
+     }
+   }
+@@ -1469,7 +1471,11 @@
+ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb &fullEncoding)
+ 
+ {
+-  int4 innersz = segop->getInnerSize();
++  if (sz < 0 || (sz == spc->getAddrSize() && sz > glb->types->getSizeOfAltPointer())) {
++    fullEncoding = val;
++    return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
++  }
++  int4 innersz = glb->types->getSizeOfPointer();
+   if (sz >= 0 && sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
+   // In this case the address offset is not fully specified
+   // we check if the rest is stored in a context variable
+--- a/src/decompiler/type.cc
++++ b/src/decompiler/type.cc
+@@ -3489,8 +3489,7 @@
+ {
+   Scope *scope = getMap();
+   uintb addrOff = AddrSpace::byteToAddress(off, spaceid->getWordSize());	// Convert from byte offset to address unit
+-  // It should always be the case that the given offset represents a full encoding of the
+-  // pointer, so the point of context is unused and the size is given as -1
++  // Spacebase displacements are analysis coordinates, not encoded machine pointers.
+   Address nullPoint;
+   uintb fullEncoding;
+   Address addr = glb->resolveConstant(spaceid, addrOff, -1, nullPoint, fullEncoding);
+@@ -3513,8 +3512,7 @@
+ {
+   Scope *scope = getMap();
+   uintb addrOff = AddrSpace::byteToAddress(off, spaceid->getWordSize());	// Convert from byte offset to address unit
+-  // It should always be the case that the given offset represents a full encoding of the
+-  // pointer, so the point of context is unused and the size is given as -1
++  // Spacebase displacements are analysis coordinates, not encoded machine pointers.
+   Address nullPoint;
+   uintb fullEncoding;
+   Address addr = glb->resolveConstant(spaceid, addrOff, -1, nullPoint, fullEncoding);
+@@ -3599,9 +3597,9 @@
+ 
+ {
+   uintb fullEncoding;
+-  // Currently a constant off of a global spacebase must be a full pointer encoding
++  // A global spacebase displacement is an analysis coordinate.
+   if (localframe.isInvalid())
+-    sz = -1;	// Set size to -1 to guarantee that full encoding recovery isn't launched
++    sz = -1;
+   return glb->resolveConstant(spaceid,off,sz,point,fullEncoding);
+ }
+ 
+@@ -3706,11 +3704,13 @@
+     sizeOfChar = 1;
+   if (sizeOfWChar == 0)
+     sizeOfWChar = 2;
+-  if (sizeOfPointer == 0)
++  SegmentOp *segOp = glb->getSegmentOp(glb->getDefaultDataSpace());
++  if (sizeOfPointer == 0) {
+     sizeOfPointer = glb->getDefaultDataSpace()->getAddrSize();
+-  SegmentOp *segOp = glb->getSegmentOp(glb->getDefaultDataSpace());
++    if (segOp != (SegmentOp *)0 && segOp->hasFarPointerSupport())
++      sizeOfPointer = segOp->getInnerSize();
++  }
+   if (segOp != (SegmentOp *)0 && segOp->hasFarPointerSupport()) {
+-    sizeOfPointer = segOp->getInnerSize();
+     sizeOfAltPointer = sizeOfPointer + segOp->getBaseSize();
+   }
+   if (alignMap.empty())
+--- a/src/decompiler/userop.cc
++++ b/src/decompiler/userop.cc
+@@ -238,8 +238,6 @@
+   }
+   else
+     bindlist[0] = (Varnode *)0;
+-  if (innervn->isConstant())
+-    innervn = data.newConstant(innerinsize,innervn->getOffset());
+   bindlist[1] = innervn;
+   return true;
+ }
+--- a/src/decompiler/coreaction.cc
++++ b/src/decompiler/coreaction.cc
+@@ -1154,6 +1154,9 @@
+   }
+ 
+   if (rampoint.isInvalid()) return (MapEntry *)0;
++  uintb coordinate = AddrSpace::byteToAddress(rampoint.getOffset(),spc->getWordSize());
++  if ((coordinate & calc_mask(vn->getSize())) != (fullEncoding & calc_mask(vn->getSize())))
++    return (MapEntry *)0;
+     // Since we are looking for a global address
+     // Assume it is address tied and use empty usepoint
+   MapEntry *entry = data.getScopeLocal()->getParent()->queryContainer(rampoint,1,Address());
+--- a/src/decompiler/funcdata.cc
++++ b/src/decompiler/funcdata.cc
+@@ -399,8 +399,8 @@
+     opSetOpcode(addOp,CPUI_PTRSUB);
+   }
+   outvn = addOp->getOut();
+-  // Make sure newconstant and extra preserve origval in address units
+-  uintb newconstoff = origval - extra;		// everything is already in address units
++  uintb coordinate = AddrSpace::byteToAddress(rampoint.getOffset(),spaceid->getWordSize());
++  uintb newconstoff = coordinate - extra;
+   newconst = newConstant(sz,newconstoff);
+   newconst->setSymbolCheck(Varnode::symcheck_complete);	// No longer need to check this constant as symbolref
+   if (spaceid->isTruncated())
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -1860,8 +1860,21 @@
+ {
+   AddrSpace *spc = glb->getDefaultCodeSpace();
+   Funcdata *fd = (Funcdata *)0;
+-  val = AddrSpace::addressToByte(val,spc->getWordSize());
+-  fd = glb->symboltab->getGlobalScope()->queryFunction( Address(spc,val));
++  Address address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
++  SegmentOp *segment = glb->getSegmentOp(spc);
++  if (segment != (SegmentOp *)0 && spc->getAddrSize() > glb->types->getSizeOfAltPointer()) {
++    if (ct->getSize() <= glb->types->getSizeOfPointer()) {
++      if (op == (const PcodeOp *)0) return false;
++      uintb selector = op->getAddr().getOffset() >> (8 * segment->getInnerSize());
++      vector<uintb> inputs {selector,val};
++      address = Address(spc,AddrSpace::addressToByte(segment->execute(inputs),spc->getWordSize()));
++    }
++    else {
++      uintb fullEncoding;
++      address = glb->resolveConstant(spc,val,ct->getSize(),op == (const PcodeOp *)0 ? Address() : op->getAddr(),fullEncoding);
++    }
++  }
++  fd = glb->symboltab->getGlobalScope()->queryFunction(address);
+   if (fd != (Funcdata *)0) {
+     pushAtom(Atom(fd->getDisplayName(),functoken,EmitMarkup::funcname_color,op,fd));
+     return true;
+--- a/src/decompiler/ruleaction.cc
++++ b/src/decompiler/ruleaction.cc
+@@ -9047,17 +9047,22 @@
+     return 1;
+   }
+   else if (segdef->hasFarPointerSupport()) {
+-    // If the hi and lo pieces come from a contigouous source
+     if (!contiguous_test(vn1,vn2)) return 0;
+     Varnode *whole = findContiguousWhole(data,vn1,vn2);
+     if (whole == (Varnode *)0) return 0;
+     if (whole->isFree()) return 0;
+-    // Use the contiguous source as the whole pointer
+-    data.opRemoveInput(op,2);
+-    data.opRemoveInput(op,1);
+-    data.opSetInput(op,whole,0);
+-    data.opSetOpcode(op,CPUI_COPY);
+-    return 1;
++    if (whole->getSize() != vn1->getSize() + vn2->getSize()) return 0;
++    // Contiguous machine fields preserve the pointee, not the numeric analysis coordinate.
++    Datatype *type = whole->getTypeReadFacing(vn2->getDef());
++    if (type->getMetatype() == TYPE_PTR) {
++      TypePointer *pointer = data.getArch()->types->resizePointer((TypePointer *)type,op->getOut()->getSize());
++      return op->getOut()->updateType(pointer,false,false) ? 1 : 0;
++    }
++    type = op->getOut()->getTypeDefFacing();
++    if (type->getMetatype() == TYPE_PTR) {
++      TypePointer *pointer = data.getArch()->types->resizePointer((TypePointer *)type,whole->getSize());
++      return whole->updateType(pointer,false,false) ? 1 : 0;
++    }
+   }
+   return 0;
+ }
+--- a/src/decompiler/typeop.cc
++++ b/src/decompiler/typeop.cc
+@@ -2649,7 +2649,10 @@
+ Datatype *TypeOpSegment::getOutputToken(const PcodeOp *op,CastStrategy *castStrategy) const
+ 
+ {
+-  return op->getIn(2)->getHighTypeReadFacing(op); // Assume type of ptr portion
++  Datatype *type = op->getIn(2)->getHighTypeReadFacing(op);
++  if (type->getMetatype() == TYPE_PTR)
++    return tlst->resizePointer((TypePointer *)type,op->getOut()->getSize());
++  return op->getOut()->getHighTypeDefFacing();
+ }
+ 
+ Datatype *TypeOpSegment::getInputCast(const PcodeOp *op,int4 slot,const CastStrategy *castStrategy) const
+@@ -2669,6 +2672,7 @@
+   // Must propagate  slot2 <-> output
+   if ((inslot==0)||(inslot==1)) return (Datatype *)0;
+   if ((outslot==0)||(outslot==1)) return (Datatype *)0;
++  if (op->getIn(2)->getSize() > tlst->getSizeOfPointer()) return (Datatype *)0;
+   if (invn->isSpacebase()) return (Datatype *)0;
+   type_metatype metain = alttype->getMetatype();
+   if (metain != TYPE_PTR) return (Datatype *)0;

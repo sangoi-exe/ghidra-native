@@ -1,0 +1,672 @@
+--- a/src/Processors/x86/data/languages/ia.sinc
++++ b/src/Processors/x86/data/languages/ia.sinc
+@@ -10,7 +10,15 @@
+ 
+ define endian=little;
+ 
+-define space ram type=ram_space size=$(SIZE) default;
++@ifdef PROTECTED16
++@define ADDRESS_SIZE "6"
++@define SEGMENT_SIZE "6"
++@else
++@define ADDRESS_SIZE "$(SIZE)"
++@define SEGMENT_SIZE "4"
++@endif
++
++define space ram type=ram_space size=$(ADDRESS_SIZE) default;
+ define space register type=register_space size=4;
+ 
+ # General purpose registers
+@@ -1106,7 +1114,11 @@
+ @endif
+ 
+ currentCS: CS is protectedMode=0 & CS { tmp:4 = (inst_next >> 4) & 0xf000; CS = tmp:2; export CS; }
++@ifdef PROTECTED16
++currentCS: CS is protectedMode=1 & CS { tmp:6 = inst_next >> 32; CS = tmp:2; export CS; }
++@else
+ currentCS: CS is protectedMode=1 & CS { tmp:4 = (inst_next >> 16) & 0xffff; CS = tmp:2; export CS; }
++@endif
+  
+ segWide: is segover=0		        { export 0:$(SIZE); }
+ segWide: CS: is segover=1 & CS	{ export 0:$(SIZE); }
+@@ -1124,18 +1136,26 @@
+ seg16: FS: is segover=5 & FS	{ export FS; }
+ seg16: GS: is segover=6 & GS	{ export GS; }
+ 
+-Mem16: addr16	is (segover=0 & mod=0 & r_m=2) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: addr16	is (segover=0 & mod=0 & r_m=3) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: addr16	is (segover=0 & mod=1 & r_m=2) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: addr16	is (segover=0 & mod=1 & r_m=3) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: addr16  	is (segover=0 & mod=1 & r_m=6) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: addr16   is (segover=0 & mod=2 & r_m=2) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: addr16   is (segover=0 & mod=2 & r_m=3) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: addr16  	is (segover=0 & mod=2 & r_m=6) ... & addr16   { tmp:$(SIZE) = segment(SS,addr16); export tmp; }
+-Mem16: seg16^addr16	is seg16; addr16							 	   { tmp:$(SIZE) = segment(seg16,addr16); export tmp; }
++Mem16: addr16	is (segover=0 & mod=0 & r_m=2) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: addr16	is (segover=0 & mod=0 & r_m=3) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: addr16	is (segover=0 & mod=1 & r_m=2) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: addr16	is (segover=0 & mod=1 & r_m=3) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: addr16  	is (segover=0 & mod=1 & r_m=6) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: addr16   is (segover=0 & mod=2 & r_m=2) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: addr16   is (segover=0 & mod=2 & r_m=3) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: addr16  	is (segover=0 & mod=2 & r_m=6) ... & addr16   { tmp:$(ADDRESS_SIZE) = segment(SS,addr16); export tmp; }
++Mem16: seg16^addr16	is seg16; addr16							 	   { tmp:$(ADDRESS_SIZE) = segment(seg16,addr16); export tmp; }
+ 
+ Mem: Mem16 is addrsize=0 & Mem16             { export Mem16; }
+ 
++@ifdef PROTECTED16
++Mem: addr32 is (addrsize=1 & segover=0 & mod=1 & r_m=5) ... & addr32 { tmp:6 = segment(SS,addr32); export tmp; }
++Mem: addr32 is (addrsize=1 & segover=0 & mod=2 & r_m=5) ... & addr32 { tmp:6 = segment(SS,addr32); export tmp; }
++Mem: addr32 is ((addrsize=1 & segover=0 & mod=0 & r_m=4; base=4) ...) & addr32 { tmp:6 = segment(SS,addr32); export tmp; }
++Mem: addr32 is ((addrsize=1 & segover=0 & mod=1 & r_m=4; (base=4 | base=5)) ...) & addr32 { tmp:6 = segment(SS,addr32); export tmp; }
++Mem: addr32 is ((addrsize=1 & segover=0 & mod=2 & r_m=4; (base=4 | base=5)) ...) & addr32 { tmp:6 = segment(SS,addr32); export tmp; }
++Mem: seg16^addr32 is addrsize=1 & seg16; addr32 { tmp:6 = segment(seg16,addr32); export tmp; }
++@else
+ @ifdef IA64
+ Mem: segWide^Addr32_64 is $(LONGMODE_ON) & addrsize=1 & segWide; Addr32_64 			{ export Addr32_64; }
+ Mem: segWide^Addr32_64 is $(LONGMODE_ON) & addrsize=1 & segWide & highseg=1; Addr32_64	{ tmp:8 = segWide + Addr32_64; export tmp; }
+@@ -1146,10 +1166,18 @@
+ Mem: segWide^addr32 is $(LONGMODE_OFF) & addrsize=1 & segWide; addr32       		{ export addr32; }
+ @endif
+ Mem: segWide^addr32 is $(LONGMODE_OFF) & addrsize=1 & segWide & highseg=1; addr32 	{ tmp:$(SIZE) = segWide + zext(addr32); export tmp; }
+-
++@endif
++
++@ifdef PROTECTED16
++rel8: reloc is opsize=0 & simm8 [ reloc=(inst_next & 0xffff00000000) | ((inst_next + simm8) & 0xffff); ] { export *[ram]:6 reloc; }
++rel8: reloc is opsize=1 & simm8 [ reloc=(inst_next & 0xffff00000000) | ((inst_next + simm8) & 0xffffffff); ] { export *[ram]:6 reloc; }
++rel16: reloc is simm16 [ reloc=(inst_next & 0xffff00000000) | ((inst_next + simm16) & 0xffff); ] { export *[ram]:6 reloc; }
++rel32: reloc is simm32 [ reloc=(inst_next & 0xffff00000000) | ((inst_next + simm32) & 0xffffffff); ] { export *[ram]:6 reloc; }
++@else
+ rel8: reloc is simm8        [ reloc=inst_next+simm8; ] { export *[ram]:$(SIZE) reloc; }
+ rel16: reloc is simm16      [ reloc=((inst_next >> 16) << 16) | ((inst_next + simm16) & 0xFFFF); ] { export *[ram]:$(SIZE) reloc; }
+ rel32: reloc is simm32      [ reloc=inst_next+simm32; ] { export *[ram]:$(SIZE) reloc; }
++@endif
+ 
+ 
+ m8:   "byte ptr" Mem   	is Mem      { export *:1 Mem; }
+@@ -1417,24 +1445,36 @@
+ ZmmReg2_m512_m64bcst: m512       is m512 & evexDisp8N                  { export m512; }
+ ZmmReg2_m512_m64bcst: m64bcst512 is evexB=1 & m64bcst512 & evexDisp8N  { export m64bcst512; }
+ 
+-moffs8: seg16^[imm16]   is addrsize=0 & seg16 & imm16                   { tmp:$(SIZE) = segment(seg16,imm16:2); export *:1 tmp; }
++moffs8: seg16^[imm16]   is addrsize=0 & seg16 & imm16                   { tmp:$(ADDRESS_SIZE) = segment(seg16,imm16:2); export *:1 tmp; }
++@ifdef PROTECTED16
++moffs8: seg16^[imm32] is addrsize=1 & seg16 & imm32 { tmp:6 = segment(seg16,imm32:4); export *:1 tmp; }
++@else
+ moffs8: segWide^[imm32]   is addrsize=1 & highseg=1 & segWide & imm32   { tmp:$(SIZE) = segWide + imm32; export *:1 tmp; }
+ moffs8: segWide^[imm32]   is addrsize=1 & segWide & imm32               { export *:1 imm32; }
++@endif
+ @ifdef IA64
+ moffs8: segWide^[imm64]   is addrsize=2 & highseg=1 & segWide & imm64   { tmp:8 = segWide + imm64; export *:1 tmp; }
+ moffs8: segWide^[imm64]   is addrsize=2 & segWide & imm64               { export *:1 imm64; }
+ @endif
+-moffs16: seg16^[imm16]  is addrsize=0 & seg16 & imm16                   { tmp:$(SIZE) = segment(seg16,imm16:2); export *:2 tmp; }
++moffs16: seg16^[imm16]  is addrsize=0 & seg16 & imm16                   { tmp:$(ADDRESS_SIZE) = segment(seg16,imm16:2); export *:2 tmp; }
++@ifdef PROTECTED16
++moffs16: seg16^[imm32] is addrsize=1 & seg16 & imm32 { tmp:6 = segment(seg16,imm32:4); export *:2 tmp; }
++@else
+ moffs16: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:$(SIZE) = segWide + imm32; export *:2 tmp; }
+ moffs16: segWide^[imm32]  is addrsize=1 & segWide & imm32               { export *:2 imm32; }
++@endif
+ @ifdef IA64
+ moffs16: segWide^[imm64]  is addrsize=2 & highseg=1 & segWide & imm64   { tmp:8 = segWide + imm64; export *:2 tmp; }
+ moffs16: segWide^[imm64]  is addrsize=2 & segWide & imm64               { export *:2 imm64; }
+ @endif
+ 
+-moffs32: seg16^[imm16]  is addrsize=0 & seg16 & imm16                   { tmp:$(SIZE) = segment(seg16,imm16:2); export *:4 tmp; }
++moffs32: seg16^[imm16]  is addrsize=0 & seg16 & imm16                   { tmp:$(ADDRESS_SIZE) = segment(seg16,imm16:2); export *:4 tmp; }
++@ifdef PROTECTED16
++moffs32: seg16^[imm32] is addrsize=1 & seg16 & imm32 { tmp:6 = segment(seg16,imm32:4); export *:4 tmp; }
++@else
+ moffs32: segWide^[imm32]  is addrsize=1 & segWide & imm32               { export *:4 imm32; }
+ moffs32: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:$(SIZE) = segWide + imm32; export *:4 tmp; }
++@endif
+ @ifdef IA64
+ moffs32: segWide^[imm64]  is addrsize=2 & segWide & imm64               { export *:4 imm64; }
+ moffs32: segWide^[imm64]  is addrsize=2 & highseg=1 & segWide & imm64   { tmp:8 = segWide + imm64; export *:4 tmp; }
+@@ -1449,24 +1489,48 @@
+ # TODO: segment register offset in 64bit might not be right
+ 
+ # String memory access
+-dseSI1: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:4 = segment(seg16,SI); SI = SI + 1-2*zext(DF); export *:1 tmp; }
++dseSI1: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:$(SEGMENT_SIZE) = segment(seg16,SI); SI = SI + 1-2*zext(DF); export *:1 tmp; }
++@ifdef PROTECTED16
++dseSI1: seg16^ESI is addrsize=1 & seg16 & ESI { tmp:6 = segment(seg16,ESI); ESI = ESI + 1-2*zext(DF); export *:1 tmp; }
++@else
+ dseSI1: segWide^ESI   is addrsize=1 & segWide & ESI { tmp:4 = ESI; ESI = ESI + 1-2*zext(DF); export *:1 tmp; }
+-dseSI2: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:4 = segment(seg16,SI); SI = SI + 2-4*zext(DF); export *:2 tmp; }
++@endif
++dseSI2: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:$(SEGMENT_SIZE) = segment(seg16,SI); SI = SI + 2-4*zext(DF); export *:2 tmp; }
++@ifdef PROTECTED16
++dseSI2: seg16^ESI is addrsize=1 & seg16 & ESI { tmp:6 = segment(seg16,ESI); ESI = ESI + 2-4*zext(DF); export *:2 tmp; }
++@else
+ dseSI2: segWide^ESI   is addrsize=1 & segWide & ESI { tmp:4 = ESI; ESI = ESI + 2-4*zext(DF); export *:2 tmp; }
+-dseSI4: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:4 = segment(seg16,SI); SI = SI + 4-8*zext(DF); export *:4 tmp; }
++@endif
++dseSI4: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:$(SEGMENT_SIZE) = segment(seg16,SI); SI = SI + 4-8*zext(DF); export *:4 tmp; }
++@ifdef PROTECTED16
++dseSI4: seg16^ESI is addrsize=1 & seg16 & ESI { tmp:6 = segment(seg16,ESI); ESI = ESI + 4-8*zext(DF); export *:4 tmp; }
++@else
+ dseSI4: segWide^ESI   is addrsize=1 & segWide & ESI { tmp:4 = ESI; ESI = ESI + 4-8*zext(DF); export *:4 tmp; }
+-eseDI1: ES:DI       is addrsize=0 & ES & DI     { tmp:4 = segment(ES,DI); DI = DI + 1-2*zext(DF); export *:1 tmp; }
++@endif
++eseDI1: ES:DI       is addrsize=0 & ES & DI     { tmp:$(SEGMENT_SIZE) = segment(ES,DI); DI = DI + 1-2*zext(DF); export *:1 tmp; }
++@ifdef PROTECTED16
++eseDI1: ES^EDI is addrsize=1 & ES & EDI { tmp:6 = segment(ES,EDI); EDI = EDI + 1-2*zext(DF); export *:1 tmp; }
++@else
+ eseDI1: ES:EDI      is addrsize=1 & ES & EDI    { tmp:4 = EDI; EDI=EDI+1-2*zext(DF); export *:1 tmp; }
+-eseDI2: ES:DI       is addrsize=0 & ES & DI     { tmp:4 = segment(ES,DI); DI = DI + 2-4*zext(DF); export *:2 tmp; }
++@endif
++eseDI2: ES:DI       is addrsize=0 & ES & DI     { tmp:$(SEGMENT_SIZE) = segment(ES,DI); DI = DI + 2-4*zext(DF); export *:2 tmp; }
++@ifdef PROTECTED16
++eseDI2: ES^EDI is addrsize=1 & ES & EDI { tmp:6 = segment(ES,EDI); EDI = EDI + 2-4*zext(DF); export *:2 tmp; }
++@else
+ eseDI2: ES:EDI      is addrsize=1 & ES & EDI    { tmp:4 = EDI; EDI=EDI+2-4*zext(DF); export *:2 tmp; }
+-eseDI4: ES:DI       is addrsize=0 & ES & DI     { tmp:4 = segment(ES,DI); DI = DI + 4-8*zext(DF); export *:4 tmp; }
++@endif
++eseDI4: ES:DI       is addrsize=0 & ES & DI     { tmp:$(SEGMENT_SIZE) = segment(ES,DI); DI = DI + 4-8*zext(DF); export *:4 tmp; }
++@ifdef PROTECTED16
++eseDI4: ES^EDI is addrsize=1 & ES & EDI { tmp:6 = segment(ES,EDI); EDI = EDI + 4-8*zext(DF); export *:4 tmp; }
++@else
+ eseDI4: ES:EDI      is addrsize=1 & ES & EDI    { tmp:4 = EDI; EDI=EDI+4-8*zext(DF); export *:4 tmp; }
++@endif
+ 
+ @ifdef IA64
+ # quadword string functions
+-dseSI8: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:4 = segment(seg16,SI); SI = SI + 8-16*zext(DF); export *:8 tmp; }
++dseSI8: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:$(SEGMENT_SIZE) = segment(seg16,SI); SI = SI + 8-16*zext(DF); export *:8 tmp; }
+ dseSI8: segWide^ESI   is addrsize=1 & segWide & ESI { tmp:4 = ESI; ESI = ESI + 8-16*zext(DF); export *:8 tmp; }
+-eseDI8: ES:DI       is addrsize=0 & ES & DI     { tmp:4 = segment(ES,DI); DI = DI + 8-16*zext(DF); export *:8 tmp; }
++eseDI8: ES:DI       is addrsize=0 & ES & DI     { tmp:$(SEGMENT_SIZE) = segment(ES,DI); DI = DI + 8-16*zext(DF); export *:8 tmp; }
+ eseDI8: ES:EDI      is addrsize=1 & ES & EDI    { tmp:4 = EDI; EDI=EDI+8-16*zext(DF); export *:8 tmp; }
+ 
+ dseSI1: RSI   is addrsize=2 & RSI { local tmp = RSI; RSI = RSI + 1-2*zext(DF); export *:1 tmp; }
+@@ -1515,9 +1579,16 @@
+ check_rm32_dest:	is epsilon	{ }
+ 
+ 
++@ifndef PROTECTED16
+ ptr1616: reloc is protectedMode=0 & imm16; j16		[ reloc = j16*0x10 + imm16; ] { CS = j16; export *[ram]:4 reloc; }
++@endif
++@ifdef PROTECTED16
++ptr1616: reloc is protectedMode=1 & imm16; j16 [ reloc = j16*0x100000000 + imm16; ] { CS = j16; export *[ram]:6 reloc; }
++ptr1632: reloc is imm32; j16 [ reloc = j16*0x100000000 + imm32; ] { CS = j16; export *[ram]:6 reloc; }
++@else
+ ptr1616: reloc is protectedMode=1 & imm16; j16		[ reloc = j16*0x10000 + imm16; ] { CS = j16; export *[ram]:4 reloc; }
+ ptr1632: j16":"imm32 is imm32; j16	{ CS = j16; export *:4 imm32; }
++@endif
+ 
+ # conditions
+ 
+@@ -1945,46 +2016,67 @@
+ macro push22(x) {
+   mysave:2 = x;
+   SP = SP -2;
+-  tmp:$(SIZE) = segment(SS,SP);
++  tmp:$(ADDRESS_SIZE) = segment(SS,SP);
+   *:2 tmp = mysave;
+ }
+ 
+ macro push24(x) {
+   mysave:4 = x;
+   SP = SP-4;
+-  tmp:$(SIZE) = segment(SS,SP);
++  tmp:$(ADDRESS_SIZE) = segment(SS,SP);
+   *:4 tmp = mysave;
+ }
+ 
+ macro push28(x) {
+   mysave:8 = x;
+   SP = SP-8;
+-  tmp:$(SIZE) = segment(SS,SP);
++  tmp:$(ADDRESS_SIZE) = segment(SS,SP);
+   *:8 tmp = mysave;
+ }
+ 
+ macro push42(x) {
++@ifdef PROTECTED16
++  push22(x);
++@else
+   mysave:2 = x;
+   $(STACKPTR) = $(STACKPTR) - 2;
+   *:2 $(STACKPTR) = mysave;
++@endif
+ }
+ 
+ macro push44(x) {
++@ifdef PROTECTED16
++  push24(x);
++@else
+   mysave:4 = x;
+   $(STACKPTR) = $(STACKPTR) - 4;
+   *:4 $(STACKPTR) = mysave;
++@endif
+ }
+ 
+ macro pushseg44(x) {
+   mysave:2 = x;
++@ifdef PROTECTED16
++  SP = SP - 4;
++  tmp:6 = segment(SS,SP);
++  *:2 tmp = mysave;
++@else
+   $(STACKPTR) = $(STACKPTR) - 4;
+   *:2 $(STACKPTR) = mysave;
++@endif
+ }
+ 
+ macro push48(x) {
++@ifdef PROTECTED16
++  mysave:8 = x;
++  SP = SP - 8;
++  tmp:6 = segment(SS,SP);
++  *:8 tmp = mysave;
++@else
+   mysave:8 = x;
+   $(STACKPTR) = $(STACKPTR) - 8;
+   *:8 $(STACKPTR) = mysave;
++@endif
+ }
+ 
+ @ifdef IA64
+@@ -2014,41 +2106,61 @@
+ @endif
+ 
+ macro pop22(x) {
+-  tmp:$(SIZE) = segment(SS,SP);
++  tmp:$(ADDRESS_SIZE) = segment(SS,SP);
+   x = *:2 tmp;
+   SP = SP+2;
+ }
+ 
+ macro pop24(x) {
+-  tmp:$(SIZE) = segment(SS,SP);
++  tmp:$(ADDRESS_SIZE) = segment(SS,SP);
+   x = *:4 tmp;
+   SP = SP+4;
+ }
+ 
+ macro pop28(x) {
+-  tmp:$(SIZE) = segment(SS,SP);
++  tmp:$(ADDRESS_SIZE) = segment(SS,SP);
+   x = *:8 tmp;
+   SP = SP+8;
+ }
+ 
+ macro pop42(x) {
++@ifdef PROTECTED16
++  pop22(x);
++@else
+   x = *:2 $(STACKPTR);
+   ESP = ESP + 2;
++@endif
+ }
+ 
+ macro pop44(x) {
++@ifdef PROTECTED16
++  pop24(x);
++@else
+   x = *:4 $(STACKPTR);
+   ESP = ESP + 4;
++@endif
+ }
+ 
+ macro popseg44(x) {
++@ifdef PROTECTED16
++  tmp:6 = segment(SS,SP);
++  x = *:2 tmp;
++  SP = SP + 4;
++@else
+   x = *:2 $(STACKPTR);
+   ESP = ESP + 4;
++@endif
+ }
+ 
+ macro pop48(x) {
++@ifdef PROTECTED16
++  tmp:6 = segment(SS,SP);
++  x = *:8 tmp;
++  SP = SP + 8;
++@else
+   x = *:8 $(STACKPTR);
+   ESP = ESP + 8;
++@endif
+ }
+ 
+ @ifdef IA64
+@@ -2889,7 +3001,7 @@
+ 											  CF = ((*:1 ptr >> (Reg16 & 0x7)) & 1) != 0; }
+ :BT Rmr32,Reg32		is vexMode=0 & opsize=1 & byte=0xf; byte=0xa3; mod=3 & Rmr32 & Reg32		{ CF = ((Rmr32 >> (Reg32 & 0x1f)) & 1) != 0; }
+ :BT Mem,Reg32		is vexMode=0 & opsize=1 & byte=0xf; byte=0xa3; Mem & Reg32 ...		{
+-@ifdef IA64
++@if defined(IA64) || defined(PROTECTED16)
+     local ptr = Mem + (sext(Reg32) s>> 3);
+ @else
+     local ptr = Mem + (Reg32 s>> 3);
+@@ -2969,7 +3081,11 @@
+ :CALL rel32     is $(LONGMODE_ON) & vexMode=0 & (opsize=1 | opsize=2) & byte=0xe8; simm32=0 & rel32      { push88(&:8 inst_next); goto rel32; }
+ @endif
+ 
+-:CALL rm16	    is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xff & currentCS; rm16 & reg_opcode=2 ...	{ local dest:4 = segment(currentCS,rm16); push22(&:2 inst_next); call [dest]; }
++@ifdef PROTECTED16
++:CALL rm16 is vexMode=0 & opsize=0 & byte=0xff & currentCS; rm16 & reg_opcode=2 ... { local dest:6 = segment(currentCS,rm16); push22(&:2 inst_next); call [dest]; }
++:CALL rm32 is vexMode=0 & opsize=1 & byte=0xff & currentCS; rm32 & reg_opcode=2 ... { local dest:6 = segment(currentCS,rm32); push24(&:4 inst_next); call [dest]; }
++@else
++:CALL rm16	    is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xff & currentCS; rm16 & reg_opcode=2 ...	{ local dest:$(SEGMENT_SIZE) = segment(currentCS,rm16); push22(&:2 inst_next); call [dest]; }
+ :CALL rm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; rm16 & reg_opcode=2 ...   { local dest:2 = rm16; push42(&:2 inst_next); call [dest]; }
+ @ifdef IA64
+ :CALL rm16      is $(LONGMODE_ON) & vexMode=0 & opsize=0 & byte=0xff; rm16 & reg_opcode=2 ...   { local dest:8 = inst_next + zext(rm16); push88(&:8 inst_next); call [dest]; }
+@@ -2981,12 +3097,36 @@
+ :CALL rm64      is $(LONGMODE_ON) & vexMode=0 & (opsize=1 | opsize=2) & byte=0xff; rm64 & reg_opcode=2 ...   { local dest:8 = rm64; push88(&:8 inst_next); call [dest]; }
+ @endif
+ 
++@endif
++
+ # direct far calls generate an opcode undefined exception in x86-64
++@ifdef PROTECTED16
++:CALLF ptr1616 is vexMode=0 & opsize=0 & byte=0x9a; ptr1616 { push22(CS); build ptr1616; push22(&:2 inst_next); call ptr1616; }
++:CALLF ptr1632 is vexMode=0 & opsize=1 & byte=0x9a; ptr1632 { pushseg44(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; }
++:CALLF Mem is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=3 ... {
++  local offset:2 = *:2 Mem;
++  local selector:2 = *:2 (Mem+2);
++  local dest:6 = segment(selector,offset);
++  push22(CS);
++  push22(&:2 inst_next);
++  CS = selector;
++  call [dest];
++}
++:CALLF Mem is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=3 ... {
++  local offset:4 = *:4 Mem;
++  local selector:2 = *:2 (Mem+4);
++  local dest:6 = segment(selector,offset);
++  pushseg44(CS);
++  push24(&:4 inst_next);
++  CS = selector;
++  call [dest];
++}
++@else
+ :CALLF ptr1616      is vexMode=0 & addrsize=0 & opsize=0 & byte=0x9a; ptr1616           { push22(CS); build ptr1616; push22(&:2 inst_next); call ptr1616; }
+ :CALLF ptr1616      is vexMode=0 & addrsize=1 & opsize=0 & byte=0x9a; ptr1616           { push42(CS); build ptr1616; push42(&:2 inst_next); call ptr1616; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=0 & opsize=1 & byte=0x9a; ptr1632           { push22(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=1 & opsize=1 & byte=0x9a; ptr1632           { pushseg44(CS); build ptr1632; push44(&:4 inst_next); call ptr1632; }
+-:CALLF Mem16        is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; Mem16 & reg_opcode=3 ... { local ptr:$(SIZE) = Mem16; local addrptr:$(SIZE) = segment(*:2 (ptr+2),*:2 ptr);
++:CALLF Mem16        is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; Mem16 & reg_opcode=3 ... { local ptr:$(ADDRESS_SIZE) = Mem16; local addrptr:$(ADDRESS_SIZE) = segment(*:2 (ptr+2),*:2 ptr);
+                                                                                                   push22(CS); push22(&:2 inst_next); call [addrptr]; }
+ :CALLF addr32       is vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; push42(CS); push42(&:2 inst_next); call [dest]; }
+ @ifdef IA64
+@@ -3000,6 +3140,8 @@
+ :CALLF addr32       is $(LONGMODE_ON) &vexMode=0 & addrsize=1 & opsize=2 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; pushseg88(CS); push88(&:8 inst_next); call [dest]; }
+ :CALLF addr64       is $(LONGMODE_ON) &vexMode=0 & addrsize=2 & opsize=1 & byte=0xff; addr64 & reg_opcode=3 ... { local dest:8 = addr64; pushseg44(CS); push84(&:4 inst_next); call [dest]; }
+ :CALLF addr64       is $(LONGMODE_ON) &vexMode=0 & addrsize=2 & opsize=2 & byte=0xff; addr64 & reg_opcode=3 ... { local dest:8 = addr64; pushseg88(CS); push88(&:8 inst_next); call [dest]; }
++@endif
++
+ @endif
+ 
+ :CBW            is vexMode=0 & opsize=0 & byte=0x98                 { AX = sext(AL); }
+@@ -3183,7 +3325,7 @@
+ #   The side-effects of the call will show up, but not the correct values
+ 
+ :CPUID          is vexMode=0 & byte=0xf; byte=0xa2                  {
+-    tmpptr:$(SIZE) = 0;
++    tmpptr:$(ADDRESS_SIZE) = 0;
+     if (EAX == 0) goto <basic_info>;
+     if (EAX == 1) goto <Version_info>;
+     if (EAX == 2) goto <cache_tlb_info>;
+@@ -3346,6 +3488,48 @@
+ 
+ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
+ 
++@ifdef PROTECTED16
++:ENTER imm16,enterFrames is vexMode=0 & opsize=0 & byte=0xc8; imm16; enterFrames {
++  push22(BP);
++  frameTemp:2 = SP;
++  count:1 = enterFrames;
++  if (count == 0) goto <done>;
++  count = count - 1;
++  if (count == 0) goto <pushframe>;
++<loop>
++  BP = BP - 2;
++  stackaddr:6 = segment(SS,BP);
++  value:2 = *:2 stackaddr;
++  push22(value);
++  count = count - 1;
++  if (count != 0) goto <loop>;
++<pushframe>
++  push22(frameTemp);
++<done>
++  BP = frameTemp;
++  SP = SP - imm16;
++}
++:ENTER imm16,enterFrames is vexMode=0 & opsize=1 & byte=0xc8; imm16; enterFrames {
++  push24(EBP);
++  frameTemp:4 = ESP;
++  count:1 = enterFrames;
++  if (count == 0) goto <done>;
++  count = count - 1;
++  if (count == 0) goto <pushframe>;
++<loop>
++  BP = BP - 4;
++  stackaddr:6 = segment(SS,BP);
++  value:4 = *:4 stackaddr;
++  push24(value);
++  count = count - 1;
++  if (count != 0) goto <loop>;
++<pushframe>
++  push24(frameTemp);
++<done>
++  EBP = frameTemp;
++  ESP = ESP - imm16;
++}
++@else
+ :ENTER imm16,enterFrames is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0xc8; imm16; enterFrames & low5=0x00 {
+         push44(EBP);
+         EBP = ESP;
+@@ -3457,9 +3641,9 @@
+ <loop>
+ 
+         BPt = BPt - 4;
+-        tmp2:$(SIZE) = segment(seg16,BPt);
++        tmp2:$(ADDRESS_SIZE) = segment(seg16,BPt);
+         SPt = SPt - 4;
+-        tmp:$(SIZE) = segment(SS,SPt);
++        tmp:$(ADDRESS_SIZE) = segment(SS,SPt);
+         *:4 tmp = *:4 tmp2;
+         ii = ii - 1;
+         if (ii s> 0) goto <loop>;
+@@ -3482,9 +3666,9 @@
+         ii:1 = enterFrames - 1;
+ <loop>
+         BPt = BPt - 2;
+-        tmp2:$(SIZE) = segment(seg16,BPt);
++        tmp2:$(ADDRESS_SIZE) = segment(seg16,BPt);
+         SPt = SPt - 2;
+-        tmp:$(SIZE) = segment(SS,SPt);
++        tmp:$(ADDRESS_SIZE) = segment(SS,SPt);
+         *:2 tmp = *:2 tmp2;
+         ii = ii - 1;
+         if (ii s> 0) goto <loop>;
+@@ -3498,6 +3682,7 @@
+         SP = SP - imm16;
+ }
+ 
++@endif
+ @ifdef IA64
+ :ENTER imm16,enterFrames is $(LONGMODE_ON) & vexMode=0 & byte=0xc8; imm16; enterFrames & low5=0x00 {
+         push88(RBP);
+@@ -3799,7 +3984,11 @@
+ :JMP rel32      is vexMode=0 & opsize=1 & byte=0xe9; rel32                      { goto rel32; }
+ :JMP rel32      is vexMode=0 & opsize=2 & byte=0xe9; rel32                      { goto rel32; }
+ 
+-:JMP rm16       is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xff & currentCS; rm16 & reg_opcode=4 ...	{ target:4 = segment(currentCS,rm16); goto [target]; }
++@ifdef PROTECTED16
++:JMP rm16 is vexMode=0 & opsize=0 & byte=0xff & currentCS; rm16 & reg_opcode=4 ... { target:6 = segment(currentCS,rm16); goto [target]; }
++:JMP rm32 is vexMode=0 & opsize=1 & byte=0xff & currentCS; rm32 & reg_opcode=4 ... { target:6 = segment(currentCS,rm32); goto [target]; }
++@else
++:JMP rm16       is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xff & currentCS; rm16 & reg_opcode=4 ...	{ target:$(SEGMENT_SIZE) = segment(currentCS,rm16); goto [target]; }
+ :JMP rm16       is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; rm16 & reg_opcode=4 ...	{ goto [rm16]; }
+ :JMP rm32       is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0xff; rm32 & reg_opcode=4 ...    { goto [rm32]; }
+ @ifdef IA64
+@@ -3807,8 +3996,14 @@
+ :JMP rm64       is $(LONGMODE_ON) & vexMode=0 & byte=0xff; rm64 & reg_opcode=4 ...   { goto [rm64]; }
+ @endif
+ 
++@endif
++
+ :JMPF ptr1616   is vexMode=0 & opsize=0 & byte=0xea; ptr1616                    { goto ptr1616; }
+ :JMPF ptr1632   is vexMode=0 & opsize=1 & byte=0xea; ptr1632                    { goto ptr1632; }
++@ifdef PROTECTED16
++:JMPF Mem is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ... { local offset:2 = *:2 Mem; CS = *:2 (Mem+2); target:6 = segment(CS,offset); goto [target]; }
++:JMPF Mem is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=5 ... { local offset:4 = *:4 Mem; CS = *:2 (Mem+4); target:6 = segment(CS,offset); goto [target]; }
++@else
+ :JMPF Mem       is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ...     { target:$(SIZE) = zext(*:2 Mem); goto [target]; }
+ :JMPF Mem       is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=5 ...     {
+ @ifdef IA64
+@@ -3820,6 +4015,7 @@
+ }
+ @ifdef IA64
+ :JMPF Mem       is vexMode=0 & opsize=2 & byte=0xff; Mem & reg_opcode=5 ...     { target:$(SIZE) = *:8 Mem; goto [target]; }
++@endif
+ @endif
+ 
+ # Initially disallowed in 64bit mode, but later reintroduced
+@@ -4536,6 +4732,16 @@
+ define pcodeop rdtsc;
+ :RDTSC          is vexMode=0 & byte=0xf; byte=0x31                  { tmp:8 = rdtsc(); EDX = tmp(4); EAX = tmp(0); }
+ 
++@ifdef PROTECTED16
++:RET is vexMode=0 & opsize=0 & byte=0xc3 { pop22(IP); target:6 = segment(CS,IP); return [target]; }
++:RET is vexMode=0 & opsize=1 & byte=0xc3 { pop24(EIP); target:6 = segment(CS,EIP); return [target]; }
++:RETF is vexMode=0 & opsize=0 & byte=0xcb { pop22(IP); pop22(CS); target:6 = segment(CS,IP); return [target]; }
++:RETF is vexMode=0 & opsize=1 & byte=0xcb { pop24(EIP); tmp:4 = 0; pop24(tmp); CS = tmp:2; target:6 = segment(CS,EIP); return [target]; }
++:RET imm16 is vexMode=0 & opsize=0 & byte=0xc2; imm16 { pop22(IP); SP = SP + imm16; target:6 = segment(CS,IP); return [target]; }
++:RET imm16 is vexMode=0 & opsize=1 & byte=0xc2; imm16 { pop24(EIP); SP = SP + imm16; target:6 = segment(CS,EIP); return [target]; }
++:RETF imm16 is vexMode=0 & opsize=0 & byte=0xca; imm16 { pop22(IP); pop22(CS); SP = SP + imm16; target:6 = segment(CS,IP); return [target]; }
++:RETF imm16 is vexMode=0 & opsize=1 & byte=0xca; imm16 { pop24(EIP); tmp:4 = 0; pop24(tmp); CS = tmp:2; SP = SP + imm16; target:6 = segment(CS,EIP); return [target]; }
++@else
+ :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xc3            { pop22(IP); EIP=segment(CS,IP); return [EIP]; }
+ :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xc3            { pop42(IP); EIP=zext(IP); return [EIP]; }
+ :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0xc3            { pop24(EIP); return [EIP]; }
+@@ -4576,6 +4782,8 @@
+ @ifdef IA64
+ :RETF imm16     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=1 & byte=0xca; imm16     { pop84(EIP); tmp:4=0; pop84(tmp); RIP=zext(EIP); CS=tmp(0); RSP=RSP+imm16; return [RIP]; }
+ :RETF imm16     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=2 & byte=0xca; imm16     { pop88(RIP); tmp:8=0; pop88(tmp); CS=tmp(0); RSP=RSP+imm16; return [RIP]; }
++@endif
++
+ @endif
+ 
+ :ROL  rm8,n1        is vexMode=0 & byte=0xD0; rm8 & n1 & reg_opcode=0 ...           { CF = rm8 s< 0; rm8 = (rm8 << 1) | CF; OF = CF ^ (rm8 s< 0); }
+@@ -5171,8 +5379,16 @@
+ :XCHG Rmr64,Reg64   is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x87; mod=3 & Rmr64 & Reg64        { local tmp = Rmr64; Rmr64 = Reg64; Reg64 = tmp; }
+ @endif
+ 
++@ifdef PROTECTED16
++:XLAT seg16^BX is vexMode=0 & addrsize=0 & seg16 & byte=0xd7; BX { offset:2 = BX+zext(AL); tmp:6 = segment(seg16,offset); AL = *:1 tmp; }
++@else
+ :XLAT seg16^BX      is vexMode=0 & addrsize=0 & seg16 & byte=0xd7; BX           { tmp:$(SIZE)= 0; ptr2(tmp,BX+zext(AL)); AL = *tmp; }
++@endif
++@ifdef PROTECTED16
++:XLAT seg16^EBX is vexMode=0 & addrsize=1 & seg16 & byte=0xd7; EBX { offset:4 = EBX+zext(AL); tmp:6 = segment(seg16,offset); AL = *:1 tmp; }
++@else
+ :XLAT segWide^EBX     is vexMode=0 & addrsize=1 & segWide & byte=0xd7; EBX          { tmp:$(SIZE)= 0; ptr4(tmp,EBX+zext(AL)); AL = *tmp; }
++@endif
+ @ifdef IA64
+ :XLAT segWide^RBX     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & segWide & byte=0xd7; RBX          { tmp:$(SIZE)= 0; ptr8(tmp,RBX+zext(AL)); AL = *tmp; }
+ @endif
+@@ -7360,9 +7576,13 @@
+ define pcodeop lddqu;
+ :LDDQU        XmmReg, m128        is vexMode=0 &  $(PRE_F2) & byte=0x0F; byte=0xF0; XmmReg ... & m128 { XmmReg = lddqu(XmmReg, m128); }
+ 
+-maskMovDI: seg16^DI    is addrsize=0 & seg16 & DI              { tmp:$(SIZE) = segment(seg16,DI); export tmp; }
++maskMovDI: seg16^DI    is addrsize=0 & seg16 & DI              { tmp:$(ADDRESS_SIZE) = segment(seg16,DI); export tmp; }
++@ifdef PROTECTED16
++maskMovDI: seg16^EDI is addrsize=1 & seg16 & EDI { tmp:6 = segment(seg16,EDI); export tmp; }
++@else
+ maskMovDI: segWide^EDI is addrsize=1 & segWide & EDI              { tmp:$(SIZE) = zext(EDI); export tmp; }
+ maskMovDI: segWide^EDI is addrsize=1 & segWide & highseg=1 & EDI  { tmp:$(SIZE) = segWide + zext(EDI); export tmp; }
++@endif
+ @ifdef IA64
+ maskMovDI: segWide^RDI is $(LONGMODE_ON) & addrsize=2 & segWide & RDI                { tmp:$(SIZE) = RDI; export tmp; }
+ maskMovDI: segWide^RDI is $(LONGMODE_ON) & addrsize=2 & segWide & highseg=1 & RDI    { tmp:$(SIZE) = segWide + RDI; export tmp; }
+--- a/src/Processors/x86/data/languages/lockable.sinc
++++ b/src/Processors/x86/data/languages/lockable.sinc
+@@ -357,7 +357,7 @@
+ {
+     build lockx;
+     build Mem;
+-@ifdef IA64
++@if defined(IA64) || defined(PROTECTED16)
+     local ptr = Mem + (sext(Reg32) s>> 3);
+ @else
+     local ptr = Mem + (Reg32 s>> 3);
+@@ -434,7 +434,7 @@
+ {
+     build lockx;
+     build Mem;
+-@ifdef IA64
++@if defined(IA64) || defined(PROTECTED16)
+     local ptr = Mem + (sext(Reg32) s>> 3);
+ @else
+     local ptr = Mem + (Reg32 s>> 3);
+@@ -511,7 +511,7 @@
+ {
+     build lockx;
+     build Mem;
+-@ifdef IA64
++@if defined(IA64) || defined(PROTECTED16)
+     local ptr = Mem + (sext(Reg32) s>>3);
+ @else
+     local ptr = Mem + (Reg32 s>>3);
+--- a/src/Processors/x86/data/languages/x86.ldefs
++++ b/src/Processors/x86/data/languages/x86.ldefs
+@@ -71,8 +71,8 @@
+             size="16"
+             variant="Protected Mode"
+             version="4.7"
+-            slafile="x86.sla"
+-            processorspec="x86-16.pspec"
++            slafile="x86-16-protected.sla"
++            processorspec="x86-16-protected.pspec"
+             manualindexfile="../manuals/x86.idx"
+             id="x86:LE:16:Protected Mode">
+     <description>Intel/AMD 16-bit x86 Protected Mode</description>
+--- /dev/null
++++ b/src/Processors/x86/data/languages/x86-16-protected.slaspec
+@@ -0,0 +1,2 @@
++@define PROTECTED16 "1"
++@include "x86.slaspec"
+--- /dev/null
++++ b/src/Processors/x86/data/languages/x86-16-protected.pspec
+@@ -0,0 +1,32 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<processor_spec>
++  <properties>
++    <property key="useOperandReferenceAnalyzerSwitchTables" value="true"/>
++    <property key="useropLibs" value="x86"/>
++  </properties>
++  <programcounter register="EIP"/>
++  <segmented_address space="ram" type="protected"/>
++  <segmentop space="ram" userop="segment" farpointer="yes">
++    <pcode>
++      <input name="base" size="2"/>
++      <input name="inner" size="4"/>
++      <output name="res" size="6"/>
++      <body><![CDATA[
++        res = (zext(base) << 32) | zext(inner);
++      ]]></body>
++    </pcode>
++    <constresolve>
++      <register name="DS"/>
++    </constresolve>
++  </segmentop>
++  <context_data>
++    <context_set space="ram">
++      <set name="addrsize" val="0"/>
++      <set name="opsize" val="0"/>
++      <set name="protectedMode" val="1"/>
++    </context_set>
++    <tracked_set space="ram">
++      <set name="DF" val="0"/>
++    </tracked_set>
++  </context_data>
++</processor_spec>

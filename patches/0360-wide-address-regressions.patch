@@ -1,0 +1,629 @@
+--- /dev/null
++++ b/src/unittests/testsegmentedwide.cc
+@@ -0,0 +1,386 @@
++#include "architecture.hh"
++#include "coreaction.hh"
++#include "emulate.hh"
++#include "funcdata.hh"
++#include "libdecomp.hh"
++#include "test.hh"
++
++namespace ghidra {
++
++static uintb protectedCoordinate(uintb selector,uintb offset) {
++  return (selector << 32) | offset;
++}
++
++class WideEnvironment {
++public:
++  Architecture *arch;
++  WideEnvironment(const string &bytes,uintb entry = protectedCoordinate(0x1234,0x1000)) {
++    startDecompilerLibrary(getenv("SLEIGHHOME"));
++    ostringstream xml;
++    xml << "<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x" << hex << entry;
++    xml << "\" readonly=\"true\">" << bytes << "</bytechunk></binaryimage>";
++    istringstream input(xml.str());
++    DocumentStorage store;
++    Document *document = store.parseDocument(input);
++    store.registerTag(document->getRoot());
++    arch = ArchitectureCapability::getCapability("xml")->buildArchitecture("","",&cout);
++    arch->init(store);
++  }
++  ~WideEnvironment(void) { delete arch; }
++};
++
++// The generic emulator lacks segment userops and eagerly decodes callees. Delegate the former to the real architecture and stop at the actual transfer.
++class WideEmulator : public EmulatePcodeCache {
++  Architecture *arch;
++  bool started;
++  void executeSegment(SegmentOp *segment,int4 first) {
++    vector<uintb> inputs;
++    inputs.push_back(memstate->getValue(currentOp->getInput(first)));
++    inputs.push_back(memstate->getValue(currentOp->getInput(first+1)));
++    memstate->setValue(currentOp->getOutput(),segment->execute(inputs));
++  }
++protected:
++  virtual void executeCallother(void) {
++    SegmentOp *segment = arch->getSegmentOp(arch->getDefaultDataSpace());
++    ASSERT(segment != (SegmentOp *)0);
++    ASSERT_EQUALS(currentOp->getInput(0)->offset,segment->getIndex());
++    executeSegment(segment,1);
++    fallthruOp();
++  }
++  virtual void executeSegmentOp(void) {
++    executeSegment(arch->getSegmentOp(currentOp->getInput(0)->getSpaceFromConst()),1);
++  }
++public:
++  Address target;
++  OpCode transfer;
++  vector<Address> reads;
++  WideEmulator(Architecture *g,MemoryState *state,BreakTable *breaks)
++    : EmulatePcodeCache(const_cast<Translate *>(g->translate),state,breaks),arch(g),started(false),transfer(CPUI_MAX) {}
++  virtual void setExecuteAddress(const Address &address) {
++    if (!started) {
++      EmulatePcodeCache::setExecuteAddress(address);
++      started = true;
++      return;
++    }
++    target = address;
++    transfer = currentOp->getOpcode();
++    setHalt(true);
++  }
++protected:
++  virtual void executeLoad(void) {
++    reads.push_back(Address(currentOp->getInput(0)->getSpaceFromConst(),memstate->getValue(currentOp->getInput(1))));
++    EmulateMemory::executeLoad();
++  }
++};
++
++static void checkFarMemoryCall(const string &bytes,bool operand32,bool address32,uintb cellOffset,uintb ds,uintb targetOffset,uintb targetSelector,bool stackAddress = false) {
++  WideEnvironment environment(bytes);
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultDataSpace();
++  MemoryImage image(ram,8,4096,arch->loader);
++  MemoryPageOverlay memory(ram,8,4096,&image);
++  MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
++  MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
++  MemoryState state(const_cast<Translate *>(arch->translate));
++  state.setMemoryBank(&memory);
++  state.setMemoryBank(&registers);
++  state.setMemoryBank(&unique);
++  BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
++  WideEmulator emulator(arch,&state,&breaks);
++  state.setValue("CS",0x1234);
++  state.setValue("DS",ds);
++  state.setValue("SS",0x6789);
++  state.setValue("ESP",0xabcd0004);
++  state.setValue("EAX",cellOffset);
++  state.setValue("EBP",cellOffset);
++  state.setValue("BX",cellOffset);
++  int4 offsetSize = operand32 ? 4 : 2;
++  uintb cell = protectedCoordinate(stackAddress ? 0x6789 : ds,address32 ? cellOffset : cellOffset & 0xffff);
++  state.setValue(ram,(ds << 16) | (cellOffset & 0xffff),offsetSize,0x1111);
++  state.setValue(ram,protectedCoordinate(ds,0x2000),offsetSize,0x2222);
++  state.setValue(ram,cell,offsetSize,targetOffset);
++  state.setValue(ram,cell+offsetSize,2,targetSelector);
++  uintb stack = protectedCoordinate(0x6789,0);
++  state.setValue(ram,stack,4,0xfeedface);
++  emulator.setExecuteAddress(Address(ram,protectedCoordinate(0x1234,0x1000)));
++  emulator.setHalt(false);
++  int4 steps = 0;
++  while (!emulator.getHalt() && steps++ < 100)
++    emulator.executeCurrentOp();
++  ASSERT(emulator.getHalt());
++  ASSERT_EQUALS(emulator.transfer,CPUI_CALLIND);
++  ASSERT_EQUALS(emulator.target,Address(ram,protectedCoordinate(targetSelector,targetOffset)));
++  ASSERT_EQUALS(emulator.reads.size(),2);
++  ASSERT_EQUALS(emulator.reads[0],Address(ram,cell));
++  ASSERT_EQUALS(emulator.reads[1],Address(ram,cell+offsetSize));
++  ASSERT_EQUALS(state.getValue("CS"),targetSelector);
++  ASSERT_EQUALS(state.getValue("ESP"),operand32 ? 0xabcdfffc : 0xabcd0000);
++  uintb returnAddress = protectedCoordinate(0x6789,operand32 ? 0xfffc : 0);
++  ASSERT_EQUALS(state.getValue(ram,returnAddress,offsetSize),0x1000 + bytes.size()/2);
++  ASSERT_EQUALS(state.getValue(ram,stack+(operand32 ? 0 : 2),2),0x1234);
++  ASSERT_EQUALS(state.getValue("DS"),ds);
++}
++
++TEST(protected_wide_callf_operand32_address32) {
++  checkFarMemoryCall("6667ff18",true,true,0x12000,0x4567,0x12345678,0x2345);
++  checkFarMemoryCall("6667ff18",true,true,0x12000,0x4567,0x98765678,0x2345);
++  checkFarMemoryCall("6667ff18",true,true,0x12000,0x4567,0x12345678,0x3456);
++  checkFarMemoryCall("6667ff18",true,true,0x22000,0x4567,0x12345678,0x2345);
++  checkFarMemoryCall("6667ff18",true,true,0x12000,0x5678,0x12345678,0x2345);
++}
++
++TEST(protected_wide_callf_operand16_address32) {
++  checkFarMemoryCall("67ff18",false,true,0x12000,0x4567,0x5678,0x2345);
++}
++
++TEST(protected_wide_callf_operand32_address16) {
++  checkFarMemoryCall("66ff1f",true,false,0x2000,0x4567,0x12345678,0x2345);
++}
++
++TEST(protected_wide_callf_operand16_address16) {
++  checkFarMemoryCall("ff1f",false,false,0x2000,0x4567,0x5678,0x2345);
++}
++
++TEST(protected_wide_callf_address32_stack_and_override) {
++  checkFarMemoryCall("6667ff5d00",true,true,0x12000,0x4567,0x12345678,0x2345,true);
++  checkFarMemoryCall("6667ff1c24",true,true,0xabcd0004,0x4567,0x12345678,0x2345,true);
++  checkFarMemoryCall("66673eff5d00",true,true,0x12000,0x4567,0x12345678,0x2345);
++}
++
++TEST(protected_wide_machine_pointer_stack_widths) {
++  WideEnvironment environment("cb");
++  Architecture *arch = environment.arch;
++  ASSERT_EQUALS(arch->getDefaultDataSpace()->getAddrSize(),6);
++  ASSERT_EQUALS(arch->getStackSpace()->getAddrSize(),2);
++  ASSERT_EQUALS(arch->types->getSizeOfPointer(),2);
++  ASSERT_EQUALS(arch->types->getSizeOfAltPointer(),4);
++  ASSERT_EQUALS(arch->translate->getRegister("EAX").size,4);
++  ASSERT_EQUALS(arch->translate->getRegister("SP").size,2);
++  ASSERT_EQUALS(arch->translate->getRegister("FS_OFFSET").size,4);
++  ASSERT_EQUALS(arch->translate->getRegister("FPUDataPointer").size,4);
++}
++
++TEST(protected_wide_typed_far_callback) {
++  WideEnvironment environment("558becff5e065dcb");
++  Architecture *arch = environment.arch;
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  PrototypePieces callback;
++  callback.model = arch->getModel("__stdcall16far");
++  callback.modelDeclared = true;
++  callback.outtype = word;
++  callback.firstVarArgSlot = -1;
++  TypeCode *code = arch->types->getTypeCode(callback);
++  TypePointer *pointer = arch->types->getTypePointer(4,code,1);
++  PrototypePieces caller;
++  caller.model = arch->getModel("__cdecl16far");
++  caller.outtype = word;
++  caller.intypes = {pointer};
++  caller.innames = {"callback"};
++  caller.firstVarArgSlot = -1;
++  Address entry(arch->getDefaultCodeSpace(),protectedCoordinate(0x1234,0x1000));
++  Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(entry,"invoke_callback")->getFunction();
++  fd->getFuncProto().setPieces(caller);
++  arch->allacts.getCurrent()->reset(*fd);
++  ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  ASSERT_EQUALS(fd->numCalls(),1);
++  FuncCallSpecs *call = fd->getCallSpecs(0);
++  ASSERT_EQUALS(call->getModelName(),"__stdcall16far");
++  ASSERT_EQUALS(call->getOp()->code(),CPUI_CALLIND);
++  Varnode *target = call->getOp()->getIn(0);
++  ASSERT_EQUALS(target->getSize(),6);
++  ASSERT(target->isWritten());
++  ASSERT_EQUALS(target->getDef()->code(),CPUI_SEGMENTOP);
++  ASSERT_EQUALS(target->getTypeReadFacing(call->getOp())->getMetatype(),TYPE_PTR);
++  TypePointer *coordinate = (TypePointer *)target->getTypeReadFacing(call->getOp());
++  ASSERT_EQUALS(coordinate->getPtrTo()->getMetatype(),TYPE_CODE);
++  const FuncProto *prototype = ((TypeCode *)coordinate->getPtrTo())->getPrototype();
++  ASSERT_EQUALS(prototype->getModelName(),"__stdcall16far");
++  ASSERT(prototype->isModelDeclared());
++  ASSERT_EQUALS(fd->getFuncProto().getParam(0)->getSize(),4);
++  ASSERT_EQUALS(pointer->getPtrTo(),code);
++}
++
++TEST(protected_wide_pointer_constants) {
++  WideEnvironment environment("cb");
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultDataSpace();
++  Address entry(ram,protectedCoordinate(0x1234,0x1000));
++  TrackedContext ds;
++  ds.loc = arch->translate->getRegister("DS");
++  ds.val = 0x4567;
++  arch->context->createSet(entry,entry+1).push_back(ds);
++  uintb encoding;
++  ASSERT_EQUALS(arch->resolveConstant(ram,0x5678,2,entry,encoding),Address(ram,protectedCoordinate(0x4567,0x5678)));
++  ASSERT_EQUALS(encoding,0x45675678);
++  ASSERT_EQUALS(arch->resolveConstant(ram,0x23455678,4,entry,encoding),Address(ram,protectedCoordinate(0x2345,0x5678)));
++  ASSERT_EQUALS(encoding,0x23455678);
++  uintb coordinate = protectedCoordinate(0x2345,0x12345678);
++  ASSERT_EQUALS(arch->resolveConstant(ram,coordinate,6,entry,encoding),Address(ram,coordinate));
++  ASSERT_EQUALS(encoding,coordinate);
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  arch->symboltab->getGlobalScope()->addSymbol("wide_global",word,Address(ram,coordinate),Address());
++  TypeSpacebase *spacebase = arch->types->getTypeSpacebase(ram,Address());
++  ASSERT_EQUALS(spacebase->getAddress(coordinate,6,entry),Address(ram,coordinate));
++  int8 remainder;
++  ASSERT_EQUALS(spacebase->getSubType(coordinate,&remainder),word);
++  ASSERT_EQUALS(remainder,0);
++
++  uintb raw = 0x23455678;
++  arch->symboltab->getGlobalScope()->addSymbol("far_global",word,Address(ram,protectedCoordinate(0x2345,0x5678)),Address());
++  Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(entry,"constant_pointer")->getFunction();
++  fd->setHighLevel();
++  fd->startTypeRecovery();
++  BlockBasic block(fd);
++  TypePointer *farPointer = arch->types->getTypePointer(4,word,1);
++  Varnode *constant = fd->newConstant(4,raw);
++  constant->updateType(farPointer,true,true);
++  PcodeOp *copy = fd->newOp(1,entry);
++  fd->opSetOpcode(copy,CPUI_COPY);
++  fd->opSetInput(copy,constant,0);
++  fd->newUniqueOut(4,copy)->updateType(farPointer,true,true);
++  fd->opInsertEnd(copy,&block);
++  ActionConstantPtr action("base");
++  action.reset(*fd);
++  action.apply(*fd);
++  ASSERT_EQUALS(copy->code(),CPUI_COPY);
++  ASSERT_EQUALS(copy->getIn(0)->getOffset(),raw);
++  ASSERT_EQUALS(copy->getIn(0)->getSize(),4);
++}
++
++TEST(protected_wide_raw_code_constant) {
++  WideEnvironment environment("6845236878569a0020563483c404cb");
++  Architecture *arch = environment.arch;
++  PrototypePieces callback;
++  callback.model = arch->getModel("__stdcall16far");
++  callback.modelDeclared = true;
++  callback.outtype = arch->types->getTypeVoid();
++  callback.firstVarArgSlot = -1;
++  TypePointer *pointer = arch->types->getTypePointer(4,arch->types->getTypeCode(callback),1);
++  Scope *global = arch->symboltab->getGlobalScope();
++  global->addFunction(Address(arch->getDefaultCodeSpace(),protectedCoordinate(0x2345,0x5678)),"far_target");
++  Funcdata *consumer = global->addFunction(Address(arch->getDefaultCodeSpace(),protectedCoordinate(0x3456,0x2000)),"consume_callback")->getFunction();
++  PrototypePieces input;
++  input.model = arch->getModel("__cdecl16far");
++  input.outtype = arch->types->getTypeVoid();
++  input.intypes = {pointer};
++  input.innames = {"callback"};
++  input.firstVarArgSlot = -1;
++  consumer->getFuncProto().setPieces(input);
++  Funcdata *fd = global->addFunction(Address(arch->getDefaultCodeSpace(),protectedCoordinate(0x1234,0x1000)),"pass_callback")->getFunction();
++  PrototypePieces caller;
++  caller.model = arch->getModel("__cdecl16far");
++  caller.outtype = arch->types->getTypeVoid();
++  caller.firstVarArgSlot = -1;
++  fd->getFuncProto().setPieces(caller);
++  arch->allacts.getCurrent()->reset(*fd);
++  ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  ASSERT_EQUALS(fd->numCalls(),1);
++  PcodeOp *call = fd->getCallSpecs(0)->getOp();
++  ASSERT_EQUALS(call->numInput(),2);
++  ASSERT_EQUALS(call->getIn(1)->getSize(),4);
++  ASSERT(call->getIn(1)->isConstant());
++  ASSERT_EQUALS(call->getIn(1)->getOffset(),0x23455678);
++  ostringstream text;
++  arch->print->setOutputStream(&text);
++  arch->print->docFunction(fd);
++  arch->print->setOutputStream((ostream *)0);
++  ASSERT(text.str().find("consume_callback(far_target)") != string::npos);
++}
++
++TEST(protected_wide_offset32_is_not_far_pointer) {
++  WideEnvironment environment("558bec6667ff185dcb");
++  Architecture *arch = environment.arch;
++  Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(Address(arch->getDefaultCodeSpace(),protectedCoordinate(0x1234,0x1000)),"wide_indirect")->getFunction();
++  arch->allacts.getCurrent()->reset(*fd);
++  ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  ASSERT_EQUALS(fd->numCalls(),1);
++  ASSERT_EQUALS(fd->getCallSpecs(0)->getOp()->getIn(0)->getSize(),6);
++  int4 conversions = 0;
++  for(auto iter = fd->beginOpAll();iter != fd->endOpAll();++iter) {
++    PcodeOp *op = iter->second;
++    if (op->isDead() || op->code() != CPUI_SEGMENTOP || op->getIn(2)->getSize() != 4) continue;
++    ASSERT_NOT_EQUALS(op->getIn(2)->getTypeReadFacing(op)->getMetatype(),TYPE_PTR);
++    ASSERT_EQUALS(op->getOut()->getSize(),6);
++    ++conversions;
++  }
++  ASSERT(conversions >= 2);
++}
++
++TEST(protected_wide_direct_far_call_and_return) {
++  for(bool returning : {false,true}) {
++    WideEnvironment environment(returning ? "66cb" : "66679a785634124523");
++    Architecture *arch = environment.arch;
++    AddrSpace *ram = arch->getDefaultDataSpace();
++    MemoryImage image(ram,8,4096,arch->loader);
++    MemoryPageOverlay memory(ram,8,4096,&image);
++    MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
++    MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
++    MemoryState state(const_cast<Translate *>(arch->translate));
++    state.setMemoryBank(&memory);
++    state.setMemoryBank(&registers);
++    state.setMemoryBank(&unique);
++    BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
++    WideEmulator emulator(arch,&state,&breaks);
++    state.setValue("CS",0x1234);
++    state.setValue("SS",0x6789);
++    state.setValue("ESP",0xabcd0004);
++    if (returning) {
++      state.setValue(ram,protectedCoordinate(0x6789,4),4,0x12345678);
++      state.setValue(ram,protectedCoordinate(0x6789,8),2,0x2345);
++    }
++    emulator.setExecuteAddress(Address(ram,protectedCoordinate(0x1234,0x1000)));
++    emulator.setHalt(false);
++    int4 steps = 0;
++    while (!emulator.getHalt() && steps++ < 100)
++      emulator.executeCurrentOp();
++    ASSERT(emulator.getHalt());
++    ASSERT_EQUALS(emulator.transfer,returning ? CPUI_RETURN : CPUI_CALL);
++    ASSERT_EQUALS(emulator.target,Address(ram,protectedCoordinate(0x2345,0x12345678)));
++    ASSERT_EQUALS(state.getValue("CS"),0x2345);
++    ASSERT_EQUALS(state.getValue("ESP"),returning ? 0xabcd000c : 0xabcdfffc);
++    if (!returning) {
++      ASSERT_EQUALS(state.getValue(ram,protectedCoordinate(0x6789,0xfffc),4),0x1009);
++      ASSERT_EQUALS(state.getValue(ram,protectedCoordinate(0x6789,0),2),0x1234);
++    }
++  }
++}
++
++TEST(protected_wide_enter_operand32_stack16) {
++  WideEnvironment environment("66c808000190");
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultDataSpace();
++  MemoryImage image(ram,8,4096,arch->loader);
++  MemoryPageOverlay memory(ram,8,4096,&image);
++  MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
++  MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
++  MemoryState state(const_cast<Translate *>(arch->translate));
++  state.setMemoryBank(&memory);
++  state.setMemoryBank(&registers);
++  state.setMemoryBank(&unique);
++  BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
++  WideEmulator emulator(arch,&state,&breaks);
++  state.setValue("SS",0x6789);
++  state.setValue("DS",0x4567);
++  state.setValue("ESP",0xabcd0008);
++  state.setValue("EBP",0x24681357);
++  Address entry(ram,protectedCoordinate(0x1234,0x1000));
++  emulator.setExecuteAddress(entry);
++  emulator.setHalt(false);
++  int4 steps = 0;
++  while (emulator.getExecuteAddress() == entry && steps++ < 100)
++    emulator.executeCurrentOp();
++  ASSERT_EQUALS(emulator.getExecuteAddress(),entry+5);
++  ASSERT_EQUALS(state.getValue(ram,protectedCoordinate(0x6789,4),4),0x24681357);
++  uintb frame = state.getValue(ram,protectedCoordinate(0x6789,0),4);
++  uintb ebp = state.getValue("EBP");
++  uintb esp = state.getValue("ESP");
++  if (frame != 0xabcd0004 || ebp != 0xabcd0004 || esp != 0xabccfff8) {
++    ostringstream error;
++    error << hex << "Operand32 ENTER: saved frame=0x" << frame << ", EBP=0x" << ebp << ", ESP=0x" << esp;
++    throw LowlevelError(error.str());
++  }
++  ASSERT_EQUALS(state.getValue("DS"),0x4567);
++  ASSERT_EQUALS(state.getValue("SS"),0x6789);
++}
++
++} // End namespace ghidra
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -998,7 +998,7 @@
+   ASSERT_EQUALS(store->getOut()->getSpace(),stack);
+   ASSERT_EQUALS(store->getOut()->getOffset(),0x12);
+   // A genuine literal-zero selector is not a synthetic stack reference.
+-  Varnode *address = env.segment(env.constant(2,0),offset,env.arch->types->getBase(4,TYPE_UNKNOWN));
++  Varnode *address = env.segment(env.constant(2,0),offset,env.arch->types->getBase(6,TYPE_UNKNOWN));
+   PcodeOp *realLoad = env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(stack->getContain()),address},word);
+   ASSERT_EQUALS(loadRule.applyOp(realLoad,*env.fd),0);
+   PcodeOp *realStore = env.op(CPUI_STORE,{env.fd->newVarnodeSpace(stack->getContain()),address,env.constant(2,1)});
+@@ -1006,11 +1006,11 @@
+   ASSERT_EQUALS(realLoad->code(),CPUI_LOAD);
+   ASSERT_EQUALS(realStore->code(),CPUI_STORE);
+   // The processor-owned constant address calculation still folds normally.
+-  PcodeOp *fixed = env.segment(env.constant(2,0x1234),env.constant(2,0x50),env.arch->types->getBase(4,TYPE_UNKNOWN))->getDef();
++  PcodeOp *fixed = env.segment(env.constant(2,0x1234),env.constant(2,0x50),env.arch->types->getBase(6,TYPE_UNKNOWN))->getDef();
+   RuleSegment segmentRule("base");
+   ASSERT_EQUALS(segmentRule.applyOp(fixed,*env.fd),1);
+   ASSERT_EQUALS(fixed->code(),CPUI_COPY);
+-  ASSERT_EQUALS(fixed->getIn(0)->getOffset(),0x12340050);
++  ASSERT_EQUALS(fixed->getIn(0)->getOffset(),0x123400000050);
+ }
+ 
+ TEST(segmented_array_address) {
+@@ -1071,7 +1071,7 @@
+   // A changed selector must reach the call through data flow, without a CALL-address STORE.
+   PcodeOp *writeSelector = env.op(CPUI_COPY,{env.fd->newVarnode(2,env.arch->translate->getRegister("DS").getAddr())});
+   Varnode *selector = env.fd->newVarnodeOut(2,ss.getAddr(),writeSelector);
+-  PcodeOp *call = env.op(CPUI_CALL,{env.fd->newVarnode(4,Address(stack->getContain(),0x2000))});
++  PcodeOp *call = env.op(CPUI_CALL,{env.fd->newVarnode(6,Address(stack->getContain(),0x2000))});
+   vector<Varnode *> initialArguments;
+   for(int4 displacement=4;displacement<=8;displacement+=2) {
+     Varnode *value = env.fd->opStackLoad(stack,displacement,2,call,(Varnode *)0,false);
+@@ -1080,7 +1080,7 @@
+     PcodeOp *segment = load->getIn(1)->getDef();
+     ASSERT_EQUALS(load->code(),CPUI_LOAD);
+     ASSERT_EQUALS(value->getSize(),2);
+-    ASSERT_EQUALS(load->getIn(1)->getSize(),4);
++    ASSERT_EQUALS(load->getIn(1)->getSize(),6);
+     ASSERT_EQUALS(segment->code(),CPUI_SEGMENTOP);
+     ASSERT_EQUALS(segment->getIn(1)->getAddr(),ss.getAddr());
+     ASSERT_EQUALS(segment->getIn(2)->getSize(),2);
+@@ -1330,7 +1330,7 @@
+       ++pushes;
+     }
+     else if (op->code() == CPUI_CALLIND) {
+-      ASSERT_EQUALS(op->getIn(0)->getSize(),4);
++      ASSERT_EQUALS(op->getIn(0)->getSize(),6);
+       ++calls;
+     }
+   }
+@@ -1360,12 +1360,12 @@
+ TEST(segmented_call_bytes) {
+   SegmentedEnvironment::initialize();
+   istringstream image(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
+-<bytechunk space="ram" offset="0x100011f2" readonly="true">
++<bytechunk space="ram" offset="0x1000000011f2" readonly="true">
+ 45558bec571e078b7e068b4e088a460a8ae0fcf7c701007404e309aa49d1e9f3ab7301aa5f5d4dcb
+ 45558bec568b76068a460850ff760a560ee8c4ff83c4068bc65e5d4dcb
+ </bytechunk>
+-<bytechunk space="ram" offset="0x10001000" readonly="true">e90d00</bytechunk>
+-<bytechunk space="ram" offset="0x10001010" readonly="true">558bec8b46065dcb</bytechunk>
++<bytechunk space="ram" offset="0x100000001000" readonly="true">e90d00</bytechunk>
++<bytechunk space="ram" offset="0x100000001010" readonly="true">558bec8b46065dcb</bytechunk>
+ </binaryimage>)");
+   DocumentStorage store;
+   Document *doc = store.parseDocument(image);
+@@ -1374,10 +1374,10 @@
+   arch->init(store);
+   AddrSpace *ram = arch->getDefaultCodeSpace();
+   Scope *global = arch->symboltab->getGlobalScope();
+-  global->addFunction(Address(ram,0x100011f2),"fill_body");
+-  Funcdata *wrapper = global->addFunction(Address(ram,0x1000121a),"fill_wrapper")->getFunction();
+-  global->addFunction(Address(ram,0x10001010),"jump_target");
+-  Funcdata *thunk = global->addFunction(Address(ram,0x10001000),"jump_thunk")->getFunction();
++  global->addFunction(Address(ram,0x1000000011f2),"fill_body");
++  Funcdata *wrapper = global->addFunction(Address(ram,0x10000000121a),"fill_wrapper")->getFunction();
++  global->addFunction(Address(ram,0x100000001010),"jump_target");
++  Funcdata *thunk = global->addFunction(Address(ram,0x100000001000),"jump_thunk")->getFunction();
+   const char *declarations[] = {
+     "extern uint2 __cdecl16far fill_body(uint2 destination,uint2 count,uint2 value);",
+     "extern uint2 __cdecl16far fill_wrapper(uint2 destination,uint2 value,uint2 count);",
+@@ -1392,7 +1392,7 @@
+   ASSERT(arch->allacts.getCurrent()->perform(*wrapper) >= 0);
+   ASSERT_EQUALS(wrapper->numCalls(),1);
+   FuncCallSpecs *spec = wrapper->getCallSpecs(0);
+-  ASSERT_EQUALS(spec->getEntryAddress(),Address(ram,0x100011f2));
++  ASSERT_EQUALS(spec->getEntryAddress(),Address(ram,0x1000000011f2));
+   PcodeOp *call = spec->getOp();
+   ASSERT_EQUALS(call->numInput(),4);
+   // With unchanged entry SS, the machine pushes and generated reads address the same formal stack.
+@@ -1419,14 +1419,14 @@
+   // Re-analyze the observed JMP with the native flow override, without a machine CALL stack write.
+   arch->allacts.getCurrent()->reset(*thunk);
+   ASSERT(arch->allacts.getCurrent()->perform(*thunk) >= 0);
+-  thunk->getOverride().insertFlowOverride(Address(ram,0x10001000),"callreturn");
++  thunk->getOverride().insertFlowOverride(Address(ram,0x100000001000),"callreturn");
+   arch->clearAnalysis(thunk);
+   arch->allacts.getCurrent()->reset(*thunk);
+   ASSERT(arch->allacts.getCurrent()->perform(*thunk) >= 0);
+   ASSERT_EQUALS(thunk->numCalls(),1);
+   call = thunk->getCallSpecs(0)->getOp();
+-  ASSERT_EQUALS(call->getAddr(),Address(ram,0x10001000));
+-  ASSERT_EQUALS(thunk->getCallSpecs(0)->getEntryAddress(),Address(ram,0x10001010));
++  ASSERT_EQUALS(call->getAddr(),Address(ram,0x100000001000));
++  ASSERT_EQUALS(thunk->getCallSpecs(0)->getEntryAddress(),Address(ram,0x100000001010));
+   ASSERT_EQUALS(call->numInput(),2);
+   ASSERT_EQUALS(call->getIn(1),thunk->findVarnodeInput(2,Address(arch->getStackSpace(),4)));
+   output.str("");
+@@ -1663,9 +1663,11 @@
+ 
+ {
+   SegmentedEnvironment::initialize();
++  uintb codeBase = language == "Protected Mode" ? 0x100000000000 : 0x10000000;
++  string codePrefix = language == "Protected Mode" ? "0x10000000" : "0x1000";
+   istringstream image("<binaryimage arch=\"x86:LE:16:" + language + ":default\">"
+-    "<bytechunk space=\"ram\" offset=\"0x10008c61\" readonly=\"true\">26833e060000752526f606040004751d26a00a0098263a260b007511f6065e70047501c399263b160c007501c3f9c3</bytechunk>"
+-    "<bytechunk space=\"ram\" offset=\"0x1000461e\" readonly=\"true\">a150708b1652708bd88bca2b0656701b165870723e23c07439833ec443007413f606d643087505e84c00eb1550e8b8af58751ff706647008007406b95f80e860ec8bc806e838f0b090e88cfae2f9e867f007c3891e5670890e5870833ec44300740cf606d643087505e80a00ebe4b93200e82decebdc</bytechunk></binaryimage>");
++    "<bytechunk space=\"ram\" offset=\"" + codePrefix + "8c61\" readonly=\"true\">26833e060000752526f606040004751d26a00a0098263a260b007511f6065e70047501c399263b160c007501c3f9c3</bytechunk>"
++    "<bytechunk space=\"ram\" offset=\"" + codePrefix + "461e\" readonly=\"true\">a150708b1652708bd88bca2b0656701b165870723e23c07439833ec443007413f606d643087505e84c00eb1550e8b8af58751ff706647008007406b95f80e860ec8bc806e838f0b090e88cfae2f9e867f007c3891e5670890e5870833ec44300740cf606d643087505e80a00ebe4b93200e82decebdc</bytechunk></binaryimage>");
+   DocumentStorage store;
+   Document *doc = store.parseDocument(image);
+   store.registerTag(doc->getRoot());
+@@ -1677,9 +1679,9 @@
+   Datatype *word = arch->types->getBase(2,TYPE_UINT);
+   Datatype *signState = qualifiedRecord(arch.get(),"Tasm31SignExtensionState5",5,{TypeField(0,0,"reject_cf",byte),TypeField(1,1,"ax",word),TypeField(2,3,"dx",word)});
+   Datatype *paddingState = qualifiedRecord(arch.get(),"Tasm31PaddingState5",5,{TypeField(0,0,"zero_zf",byte),TypeField(1,1,"ds",word),TypeField(2,3,"es",word)});
+-  Funcdata *sign = global->addFunction(Address(ram,0x10008c61),"tasm31_push_sign_extension_cf")->getFunction();
+-  Funcdata *gate = global->addFunction(Address(ram,0x1000f606),"tasm31_padding_gate_zf")->getFunction();
+-  Funcdata *caller = global->addFunction(Address(ram,0x1000461e),"tasm31_conditional_nop_fill")->getFunction();
++  Funcdata *sign = global->addFunction(Address(ram,codeBase + 0x8c61),"tasm31_push_sign_extension_cf")->getFunction();
++  Funcdata *gate = global->addFunction(Address(ram,codeBase + 0xf606),"tasm31_padding_gate_zf")->getFunction();
++  Funcdata *caller = global->addFunction(Address(ram,codeBase + 0x461e),"tasm31_conditional_nop_fill")->getFunction();
+   PrototypePieces pieces;
+   pieces.model = arch->getModel("tasm31_sign_extension_state_16near");
+   pieces.outtype = signState;
+@@ -1694,7 +1696,7 @@
+   gate->getFuncProto().setPieces(pieces);
+   // These unrelated targets remain opaque; only normal call structure is needed for this caller observation.
+   for(uintb offset : {0x4694,0x32bf,0x369d,0x40f6,0x36d6})
+-    global->addFunction(Address(ram,0x10000000 + offset),"opaque_" + to_string(offset));
++    global->addFunction(Address(ram,codeBase + offset),"opaque_" + to_string(offset));
+   arch->allacts.getCurrent()->reset(*sign);
+   ASSERT(arch->allacts.getCurrent()->perform(*sign) >= 0);
+   ASSERT_EQUALS(sign->numCalls(),0);
+@@ -1722,7 +1724,7 @@
+   FuncCallSpecs *spec = (FuncCallSpecs *)0;
+   for(int4 i=0;i<caller->numCalls();++i) {
+     FuncCallSpecs *candidate = caller->getCallSpecs(i);
+-    if (candidate->getOp()->getAddr() == Address(ram,0x1000464b)) spec = candidate;
++    if (candidate->getOp()->getAddr() == Address(ram,codeBase + 0x464b)) spec = candidate;
+   }
+   ASSERT(spec != (FuncCallSpecs *)0);
+   ASSERT_EQUALS(spec->getEntryAddress(),gate->getAddress());
+@@ -1737,15 +1739,15 @@
+   for(PcodeOpTree::const_iterator iter=caller->beginOpAll();iter!=caller->endOpAll();++iter) {
+     PcodeOp *op = (*iter).second;
+     if (op->isDead()) continue;
+-    if (op->code() == CPUI_CBRANCH && op->getAddr() == Address(ram,0x1000464f)) {
++    if (op->code() == CPUI_CBRANCH && op->getAddr() == Address(ram,codeBase + 0x464f)) {
+       ASSERT(tasm31DependsOn(op->getIn(1),call->getOut()));
+       flagBranch = true;
+     }
+-    if (op->code() == CPUI_SEGMENTOP && op->getAddr() == Address(ram,0x10004651)) {
++    if (op->code() == CPUI_SEGMENTOP && op->getAddr() == Address(ram,codeBase + 0x4651)) {
+       ASSERT(tasm31DependsOn(op->getIn(1),call->getOut()));
+       currentSelector = true;
+     }
+-    if (op->code() == CPUI_STORE && op->getAddr() == Address(ram,0x10004661)) {
++    if (op->code() == CPUI_STORE && op->getAddr() == Address(ram,codeBase + 0x4661)) {
+       ASSERT(tasm31DependsOn(op->getIn(2),call->getOut()));
+       savesCurrentES = true;
+     }
+@@ -1767,10 +1769,11 @@
+ 
+ {
+   SegmentedEnvironment::initialize();
+-  uintb leafOffset = language == "Protected Mode" ? 0x0f90074b : 0x1004b;
++  uintb leafOffset = language == "Protected Mode" ? 0x0f900000074b : 0x1004b;
++  uintb codeBase = language == "Protected Mode" ? 0x100000000000 : 0x10000000;
+   ostringstream imageText;
+   imageText << "<binaryimage arch=\"x86:LE:16:" << language << ":default\">"
+-    "<bytechunk space=\"ram\" offset=\"0x1000f687\" readonly=\"true\">f606d64301740cf606a0700175059a4b07900f803eaf70007501c3f606d64301740cf606a0701075099a4b07900f32c0fec8c3</bytechunk>"
++    "<bytechunk space=\"ram\" offset=\"0x" << hex << codeBase + 0xf687 << "\" readonly=\"true\">f606d64301740cf606a0700175059a4b07900f803eaf70007501c3f606d64301740cf606a0701075099a4b07900f32c0fec8c3</bytechunk>"
+     "<bytechunk space=\"ram\" offset=\"0x" << hex << leafOffset << "\" readonly=\"true\">f606c343807505c606984501cb</bytechunk></binaryimage>";
+   istringstream image(imageText.str());
+   DocumentStorage store;
+@@ -1781,7 +1784,7 @@
+   AddrSpace *ram = arch->getDefaultCodeSpace();
+   Scope *global = arch->symboltab->getGlobalScope();
+   Funcdata *leaf = global->addFunction(Address(ram,leafOffset),"tasm31_conditional_store_leaf")->getFunction();
+-  Funcdata *current = global->addFunction(Address(ram,0x1000f687),"tasm31_current_state_predicate_zf")->getFunction();
++  Funcdata *current = global->addFunction(Address(ram,codeBase + 0xf687),"tasm31_current_state_predicate_zf")->getFunction();
+   Datatype *byte = arch->types->getBase(1,TYPE_UINT);
+   Datatype *word = arch->types->getBase(2,TYPE_UINT);
+   Datatype *state = qualifiedRecord(arch.get(),"Tasm31CurrentState2",2,{TypeField(0,0,"zero_zf",byte),TypeField(1,1,"al",byte)});
+@@ -1842,8 +1845,8 @@
+   for(PcodeOpTree::const_iterator iter=current->beginOpAll();iter!=current->endOpAll();++iter) {
+     PcodeOp *op = (*iter).second;
+     if (op->isDead()) continue;
+-    if (op->code() == CPUI_LOAD && op->getAddr() == Address(ram,0x1000f69a)) fresh = op->getOut();
+-    if (op->code() == CPUI_CBRANCH && op->getAddr() == Address(ram,0x1000f69f)) branch = op;
++    if (op->code() == CPUI_LOAD && op->getAddr() == Address(ram,codeBase + 0xf69a)) fresh = op->getOut();
++    if (op->code() == CPUI_CBRANCH && op->getAddr() == Address(ram,codeBase + 0xf69f)) branch = op;
+     if (op->code() == CPUI_RETURN) {
+       ASSERT_EQUALS(op->numInput(),2);
+       ASSERT_EQUALS(op->getIn(1)->getSize(),2);
+@@ -1877,7 +1880,7 @@
+   // The caller supplies a qualified resume; these decoded bytes test the operation, not helper/prefix qualification.
+   for(int4 length=7;length>=6;--length) {
+     istringstream image(string(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
+-<bytechunk space="ram" offset="0x1000de2c" readonly="true">e8c1d6)") +
++<bytechunk space="ram" offset="0x10000000de2c" readonly="true">e8c1d6)") +
+         (length == 7 ? "07" : "06") + R"(00000000000040b83412c3</bytechunk>
+ </binaryimage>)");
+     DocumentStorage store;
+@@ -1886,10 +1889,10 @@
+     unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
+     arch->init(store);
+     AddrSpace *ram = arch->getDefaultCodeSpace();
+-    Address callAddress(ram,0x1000de2c);
+-    Address adjacentReturn(ram,0x1000de2f);
++    Address callAddress(ram,0x10000000de2c);
++    Address adjacentReturn(ram,0x10000000de2f);
+     Address resume(ram,adjacentReturn.getOffset() + 1 + length);
+-    Address target(ram,0x1000b4f0);
++    Address target(ram,0x10000000b4f0);
+     Scope *global = arch->symboltab->getGlobalScope();
+     global->addFunction(target,"inline_consumer");
+     Funcdata *fd = global->addFunction(callAddress,"inline_caller")->getFunction();
+@@ -1945,7 +1948,7 @@
+           pushedAdjacentReturn = true;
+       }
+       if (op->code() == CPUI_RETURN) {
+-        ASSERT_EQUALS(op->getAddr(),Address(ram,0x1000de3a));
++        ASSERT_EQUALS(op->getAddr(),Address(ram,0x10000000de3a));
+         ++returns;
+       }
+     }
