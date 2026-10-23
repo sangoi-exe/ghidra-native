@@ -86,25 +86,27 @@ index a5cb0d0..7b0d1ae 100644
    return (TypeUnion *) findAdd(tmp);
  }
  
-@@ -4573,12 +4589,15 @@ TypePartialUnion *TypeFactory::getTypePartialUnion(TypeUnion *contain,int4 off,i
+@@ -4573,12 +4589,16 @@ TypePartialUnion *TypeFactory::getTypePartialUnion(TypeUnion *contain,int4 off,i
  /// The created enumeration will have no named values and a default configuration
  /// Named values must be added later.
  /// \param n is the name of the enumeration
 +/// \param id is the explicit identity (or zero to hash the name)
 +/// \param label is the display name (or empty to use the name)
++/// \param size is the explicit byte size (or zero to use the configured default)
  /// \return the TypeEnum object
 -TypeEnum *TypeFactory::getTypeEnum(const string &n)
-+TypeEnum *TypeFactory::getTypeEnum(const string &n,uint8 id,const string &label)
++TypeEnum *TypeFactory::getTypeEnum(const string &n,uint8 id,const string &label,int4 size)
  
  {
-   TypeEnum tmp(enumsize,enumtype,n);
+-  TypeEnum tmp(enumsize,enumtype,n);
++  TypeEnum tmp(size == 0 ? enumsize : size,enumtype,n);
 -  tmp.id = Datatype::hashName(n);
 +  tmp.displayName = label.empty() ? n : label;
 +  tmp.id = (id == 0) ? Datatype::hashName(n) : id;
    return (TypeEnum *) findAdd(tmp);
  }
  
-@@ -4608,10 +4627,15 @@ TypeSpacebase *TypeFactory::getTypeSpacebase(AddrSpace *id,const Address &addr)
+@@ -4608,10 +4628,15 @@ TypeSpacebase *TypeFactory::getTypeSpacebase(AddrSpace *id,const Address &addr)
  
  /// Creates a TypeCode object and associates a specific function prototype with it.
  /// \param proto is the list of names, data-types, and other attributes of the prototype
@@ -122,7 +124,7 @@ index a5cb0d0..7b0d1ae 100644
    tc.setPrototype(this,proto,getTypeVoid());
    tc.markComplete();
    return (TypeCode *) findAdd(tc);
-@@ -4925,6 +4949,7 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
+@@ -4925,6 +4950,7 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
  {
    uint8 id = 0;
    string nm;
@@ -130,7 +132,7 @@ index a5cb0d0..7b0d1ae 100644
    uint4 format = 0;		// No forced display format by default
  //  uint4 elemId = decoder.openElement();
    for(;;) {
-@@ -4936,6 +4961,9 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
+@@ -4936,6 +4962,9 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
      else if (attribId == ATTRIB_NAME) {
        nm = decoder.readString();
      }
@@ -140,7 +142,7 @@ index a5cb0d0..7b0d1ae 100644
      else if (attribId == ATTRIB_FORMAT) {
        format = Datatype::encodeIntegerFormat(decoder.readString());
      }
-@@ -4967,10 +4995,15 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
+@@ -4967,10 +4996,15 @@ Datatype *TypeFactory::decodeTypedef(Decoder &decoder)
  	if (prevUnion->field.size() != defedUnion->field.size())
  	  setFields(defedUnion->field,prevUnion,defedUnion->size,defedUnion->alignment,defedUnion->flags);
        }
@@ -183,7 +185,7 @@ index 942e076..46806be 100644
 +  TypeUnion *getTypeUnion(const string &n,uint8 id=0,const string &label="");	///< Create an (empty) union
    TypePartialUnion *getTypePartialUnion(TypeUnion *contain,int4 off,int4 sz);	///< Create a partial union
 -  TypeEnum *getTypeEnum(const string &n);			///< Create an (empty) enumeration
-+  TypeEnum *getTypeEnum(const string &n,uint8 id=0,const string &label="");	///< Create an (empty) enumeration
++  TypeEnum *getTypeEnum(const string &n,uint8 id=0,const string &label="",int4 size=0);	///< Create an (empty) enumeration
    TypePartialEnum *getTypePartialEnum(TypeEnum *contain,int4 off,int4 sz);	///< Create a partial enumeration
    TypeSpacebase *getTypeSpacebase(AddrSpace *id,const Address &addr);	///< Create a "spacebase" type
 -  TypeCode *getTypeCode(const PrototypePieces &proto);			///< Create a "function" datatype
@@ -196,7 +198,7 @@ new file mode 100644
 index 0000000..444e0e2
 --- /dev/null
 +++ b/src/unittests/testidentity.cc
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,345 @@
 +#include "architecture.hh"
 +#include "libdecomp.hh"
 +#include "printc.hh"
@@ -358,6 +360,42 @@ index 0000000..444e0e2
 +  ASSERT_EQUALS(types.cases[9]->getDisplayName(),"ChoiceAlias");
 +  ASSERT_EQUALS(((TypePointer *)types.record->getDepend(1))->getPtrTo(),types.cases[3]);
 +  ASSERT_EQUALS(printer.declaration(types.cases[3]),"const struct Alias value");
++}
++
++TEST(explicit_native_enum_width) {
++  IdentityEnvironment env;
++  IdentityTypes types(env.arch);
++  TypeFactory *factory = env.arch->types;
++  TypeEnum *wideMode = factory->getTypeEnum("WideMode",304,"enum WideMode",4);
++  TypeEnum *byteMode = factory->getTypeEnum("ByteMode",303,"enum ByteMode",1);
++  ASSERT_EQUALS(byteMode->getSize(),1);
++  ASSERT_EQUALS(byteMode->getName(),"ByteMode");
++  ASSERT_EQUALS(byteMode->getId(),303);
++  ASSERT_EQUALS(byteMode->getDisplayName(),"enum ByteMode");
++  ASSERT_EQUALS(wideMode->getSize(),4);
++  ASSERT_EQUALS(wideMode->getName(),"WideMode");
++  ASSERT_EQUALS(wideMode->getId(),304);
++  ASSERT_EQUALS(wideMode->getDisplayName(),"enum WideMode");
++  ASSERT_EQUALS(factory->getTypeEnum("ByteMode",303,"enum ByteMode",1),byteMode);
++  ASSERT_EQUALS(factory->getTypeEnum("WideMode",304,"enum WideMode",4),wideMode);
++  for(TypeEnum *mode : {byteMode,wideMode}) {
++    ASSERT(mode->isEnumType());
++    ASSERT_EQUALS(mode->getMetatype(),types.mode->getMetatype());
++    factory->setEnumValues({{1,"enabled"}},mode);
++    ASSERT(mode->hasNamedValue(1));
++    ASSERT_EQUALS(mode->beginEnum()->first,1);
++    ASSERT_EQUALS(mode->beginEnum()->second,"enabled");
++  }
++  TypeEnum *defaultMode = factory->getTypeEnum("DefaultAfter");
++  TypeEnum *zeroMode = factory->getTypeEnum("DefaultZero",0,"",0);
++  ASSERT_EQUALS(defaultMode->getSize(),types.mode->getSize());
++  ASSERT_EQUALS(defaultMode->getMetatype(),types.mode->getMetatype());
++  ASSERT_EQUALS(defaultMode->getId(),Datatype::hashName("DefaultAfter"));
++  ASSERT_EQUALS(defaultMode->getDisplayName(),"DefaultAfter");
++  ASSERT_EQUALS(zeroMode->getSize(),types.mode->getSize());
++  ASSERT_EQUALS(zeroMode->getMetatype(),types.mode->getMetatype());
++  ASSERT_EQUALS(zeroMode->getId(),Datatype::hashName("DefaultZero"));
++  ASSERT_EQUALS(zeroMode->getDisplayName(),"DefaultZero");
 +}
 +
 +TEST(explicit_native_code_identity) {
