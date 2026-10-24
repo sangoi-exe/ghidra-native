@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/unittests/testsegmentedwide.cc
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,511 @@
 +#include "architecture.hh"
 +#include "coreaction.hh"
 +#include "emulate.hh"
@@ -384,6 +384,67 @@
 +  }
 +  ASSERT_EQUALS(state.getValue("DS"),0x4567);
 +  ASSERT_EQUALS(state.getValue("SS"),0x6789);
++}
++
++// Register values and payload were measured on Windows 3.11 Enhanced Mode under KVM with SS D/B clear.
++static void checkProtectedLeave(const string &bytes,uintb expectedEsp,uintb expectedEbp) {
++  WideEnvironment environment(bytes+"90",protectedCoordinate(0x1567,0x1000));
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultDataSpace();
++  MemoryImage image(ram,8,4096,arch->loader);
++  MemoryPageOverlay memory(ram,8,4096,&image);
++  MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
++  MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
++  MemoryState state(const_cast<Translate *>(arch->translate));
++  state.setMemoryBank(&memory);
++  state.setMemoryBank(&registers);
++  state.setMemoryBank(&unique);
++  BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
++  WideEmulator emulator(arch,&state,&breaks);
++  state.setValue("CS",0x1567);
++  state.setValue("DS",0x155f);
++  state.setValue("SS",0x155f);
++  state.setValue("ESP",0x8001177c);
++  state.setValue("EBP",0xda5b178c);
++  // This cell is native consumer setup, not an observed Windows descriptor mapping.
++  uintb cell = protectedCoordinate(0x155f,0x178c);
++  state.setValue(ram,cell,4,0xa1b2c3d4);
++  Address entry(ram,protectedCoordinate(0x1567,0x1000));
++  emulator.setExecuteAddress(entry);
++  emulator.setHalt(false);
++  int4 steps = 0;
++  while (emulator.getExecuteAddress() == entry && steps++ < 100)
++    emulator.executeCurrentOp();
++  ASSERT_EQUALS(emulator.getExecuteAddress(),entry+bytes.size()/2);
++  uintb esp = state.getValue("ESP");
++  uintb ebp = state.getValue("EBP");
++  if (esp != expectedEsp || ebp != expectedEbp) {
++    ostringstream error;
++    error << hex << "LEAVE " << bytes << ": ESP=0x" << esp << ", EBP=0x" << ebp;
++    error << "; measured ESP=0x" << expectedEsp << ", EBP=0x" << expectedEbp;
++    throw LowlevelError(error.str());
++  }
++  ASSERT_EQUALS(emulator.reads.size(),1);
++  ASSERT_EQUALS(emulator.reads[0],Address(ram,cell));
++  ASSERT_EQUALS(state.getValue("CS"),0x1567);
++  ASSERT_EQUALS(state.getValue("DS"),0x155f);
++  ASSERT_EQUALS(state.getValue("SS"),0x155f);
++}
++
++TEST(protected_wide_leave_c9_stack16) {
++  checkProtectedLeave("c9",0x8001178e,0xda5bc3d4);
++}
++
++TEST(protected_wide_leave_66c9_stack16) {
++  checkProtectedLeave("66c9",0x80011790,0xa1b2c3d4);
++}
++
++TEST(protected_wide_leave_67c9_stack16) {
++  checkProtectedLeave("67c9",0x8001178e,0xda5bc3d4);
++}
++
++TEST(protected_wide_leave_6667c9_stack16) {
++  checkProtectedLeave("6667c9",0x80011790,0xa1b2c3d4);
 +}
 +
 +static void checkRealModePointerGlobal(int4 pointerSize,uintb raw) {

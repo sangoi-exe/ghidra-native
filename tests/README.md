@@ -75,6 +75,8 @@ The same test owner exercises hidden-return recovery with the x86-64 GCC model. 
 `src/unittests/testsegmentedwide.cc`
 : Patch0360 supplies protected-mode C48 regressions. The existing native emulator executes actual translated CALLF, return, memory-address and operand32 ENTER instructions; its segment adapter delegates to the registered `SegmentOp::execute`, not a copied coordinate formula. CALLF checks vary pointer-cell locations and loaded selector/offset fields independently, including nonzero offset high words, independent DS/SS and SP wrap. Assertions inspect the actual target and saved return frame. Type/constant controls retain near2/far4 pointers, stack2, supplied callback models and value-preserving symbol reconstruction. These finite cases do not certify every x86 mode, descriptor behavior or ENTER nesting level, and do not establish original-game reachability.
 
+Four separate `protected_wide_leave_*_stack16` tests execute C9, 66C9, 67C9 and 6667C9. Their initial ESP/EBP, stack payload and final register values come from an actual MS-DOS 6.22/Windows 3.11 Enhanced Mode run under QEMU 8.2.2 with KVM enabled and SS D/B clear. The measured upper ESP remains unchanged in every case; the operand size selects the popped width. The tests place the payload at the native SS:BP analysis coordinate only to compare this consumer with those observations, not to assert Windows descriptor mapping or raw-byte equality. These cases do not qualify other stack sizes or the bridge runtime.
+
 ## Manual Dalvik integration repro
 
 The Dalvik item of PR #26 is about `<pcode inject="uponentry"
