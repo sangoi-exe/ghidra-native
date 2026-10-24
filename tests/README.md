@@ -77,6 +77,9 @@ The same test owner exercises hidden-return recovery with the x86-64 GCC model. 
 
 Four separate `protected_wide_leave_*_stack16` tests execute C9, 66C9, 67C9 and 6667C9. Their initial ESP/EBP, stack payload and final register values come from an actual MS-DOS 6.22/Windows 3.11 Enhanced Mode run under QEMU 8.2.2 with KVM enabled and SS D/B clear. The measured upper ESP remains unchanged in every case; the operand size selects the popped width. The tests place the payload at the native SS:BP analysis coordinate only to compare this consumer with those observations, not to assert Windows descriptor mapping or raw-byte equality. These cases do not qualify other stack sizes or the bridge runtime.
 
+`src/unittests/testrelocatedfields.cc`
+: Patch0370 exercises the real Sleigh decoder and ordinary PcodeEmit boundary with controlled LoadImage field metadata. The FAR-call shape comes from the executed INSTR.EXE instruction at file0xb13/C48 0x100000913: relocation source0x100000914 spans four bytes, its unknown selector source0x100000916 spans two bytes, and the independent static target is0x100000994. Assertions separate the two-byte RAM input to CS from the six-byte CALL coordinate, retain two-byte stack operations, and leave same-valued unrelated immediate fields and generated constants untouched. Raw, analysis-overlay and observed-selector-valued input variants cannot supply a constant CS. Query misses retain numeric decoding; missing static targets and unrepresentable widened machine values refuse before emission. These are local construction controls, not an implementation or qualification of the bridge provider, Windows loader, relationship resolver or full selector/DS-load chain. The existing wide-address owner retains ordinary near2/far4 pointer controls.
+
 ## Manual Dalvik integration repro
 
 The Dalvik item of PR #26 is about `<pcode inject="uponentry"
