@@ -190,8 +190,8 @@
  ptr1616: reloc is protectedMode=0 & imm16; j16		[ reloc = j16*0x10 + imm16; ] { CS = j16; export *[ram]:4 reloc; }
 +@endif
 +@ifdef PROTECTED16
-+ptr1616: reloc is protectedMode=1 & imm16; j16 [ reloc = j16*0x100000000 + imm16; ] { CS = j16; export *[ram]:6 reloc; }
-+ptr1632: reloc is imm32; j16 [ reloc = j16*0x100000000 + imm32; ] { CS = j16; export *[ram]:6 reloc; }
++ptr1616: j16":"imm16 is protectedMode=1 & imm16; j16 { local selector:2 = j16; local offset:2 = imm16; target:6 = segment(selector,offset); CS = selector; export target; }
++ptr1632: j16":"imm32 is imm32; j16 { local selector:2 = j16; local offset:4 = imm32; target:6 = segment(selector,offset); CS = selector; export target; }
 +@else
  ptr1616: reloc is protectedMode=1 & imm16; j16		[ reloc = j16*0x10000 + imm16; ] { CS = j16; export *[ram]:4 reloc; }
  ptr1632: j16":"imm32 is imm32; j16	{ CS = j16; export *:4 imm32; }
@@ -365,8 +365,8 @@
 +
  # direct far calls generate an opcode undefined exception in x86-64
 +@ifdef PROTECTED16
-+:CALLF ptr1616 is vexMode=0 & opsize=0 & byte=0x9a; ptr1616 { push22(CS); build ptr1616; push22(&:2 inst_next); call ptr1616; }
-+:CALLF ptr1632 is vexMode=0 & opsize=1 & byte=0x9a; ptr1632 { pushseg44(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; }
++:CALLF ptr1616 is vexMode=0 & opsize=0 & byte=0x9a; ptr1616 { push22(CS); build ptr1616; push22(&:2 inst_next); call [ptr1616]; }
++:CALLF ptr1632 is vexMode=0 & opsize=1 & byte=0x9a; ptr1632 { pushseg44(CS); build ptr1632; push24(&:4 inst_next); call [ptr1632]; }
 +:CALLF Mem is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=3 ... {
 +  local offset:2 = *:2 Mem;
 +  local selector:2 = *:2 (Mem+2);
@@ -507,30 +507,32 @@
  :JMP rm16       is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; rm16 & reg_opcode=4 ...	{ goto [rm16]; }
  :JMP rm32       is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0xff; rm32 & reg_opcode=4 ...    { goto [rm32]; }
  @ifdef IA64
-@@ -3807,8 +3996,14 @@
+@@ -3807,6 +3996,14 @@
  :JMP rm64       is $(LONGMODE_ON) & vexMode=0 & byte=0xff; rm64 & reg_opcode=4 ...   { goto [rm64]; }
  @endif
  
 +@endif
 +
- :JMPF ptr1616   is vexMode=0 & opsize=0 & byte=0xea; ptr1616                    { goto ptr1616; }
- :JMPF ptr1632   is vexMode=0 & opsize=1 & byte=0xea; ptr1632                    { goto ptr1632; }
 +@ifdef PROTECTED16
++:JMPF ptr1616 is vexMode=0 & opsize=0 & byte=0xea; ptr1616 { goto [ptr1616]; }
++:JMPF ptr1632 is vexMode=0 & opsize=1 & byte=0xea; ptr1632 { goto [ptr1632]; }
 +:JMPF Mem is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ... { local offset:2 = *:2 Mem; CS = *:2 (Mem+2); target:6 = segment(CS,offset); goto [target]; }
 +:JMPF Mem is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=5 ... { local offset:4 = *:4 Mem; CS = *:2 (Mem+4); target:6 = segment(CS,offset); goto [target]; }
 +@else
+ :JMPF ptr1616   is vexMode=0 & opsize=0 & byte=0xea; ptr1616                    { goto ptr1616; }
+ :JMPF ptr1632   is vexMode=0 & opsize=1 & byte=0xea; ptr1632                    { goto ptr1632; }
  :JMPF Mem       is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ...     { target:$(SIZE) = zext(*:2 Mem); goto [target]; }
- :JMPF Mem       is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=5 ...     {
- @ifdef IA64
-@@ -3820,6 +4015,7 @@
- }
+@@ -3821,6 +4018,7 @@
  @ifdef IA64
  :JMPF Mem       is vexMode=0 & opsize=2 & byte=0xff; Mem & reg_opcode=5 ...     { target:$(SIZE) = *:8 Mem; goto [target]; }
-+@endif
  @endif
++@endif
  
  # Initially disallowed in 64bit mode, but later reintroduced
-@@ -3881,7 +4077,13 @@
+ :LAHF           is vexMode=0 & byte=0x9f { AH=(SF<<7)|(ZF<<6)|(AF<<4)|(PF<<2)|2|CF; }
+@@ -3879,9 +4077,15 @@
+ @endif
+
  :LEAVE          is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xc9         { SP = BP; pop22(BP); }
 +@ifdef PROTECTED16
 +:LEAVE          is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0xc9         { SP = BP; pop24(EBP); }
@@ -544,7 +546,7 @@
  @ifdef IA64
  :LEAVE          is $(LONGMODE_ON) & vexMode=0 & opsize=0 & byte=0xc9         { RSP = RBP; pop82(BP); }
  :LEAVE          is $(LONGMODE_ON) & vexMode=0 & byte=0xc9   { RSP = RBP; pop88(RBP); }
-@@ -4536,6 +4738,16 @@
+@@ -4536,6 +4740,16 @@
  define pcodeop rdtsc;
  :RDTSC          is vexMode=0 & byte=0xf; byte=0x31                  { tmp:8 = rdtsc(); EDX = tmp(4); EAX = tmp(0); }
  
@@ -561,7 +563,7 @@
  :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xc3            { pop22(IP); EIP=segment(CS,IP); return [EIP]; }
  :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xc3            { pop42(IP); EIP=zext(IP); return [EIP]; }
  :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0xc3            { pop24(EIP); return [EIP]; }
-@@ -4576,6 +4788,8 @@
+@@ -4576,6 +4790,8 @@
  @ifdef IA64
  :RETF imm16     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=1 & byte=0xca; imm16     { pop84(EIP); tmp:4=0; pop84(tmp); RIP=zext(EIP); CS=tmp(0); RSP=RSP+imm16; return [RIP]; }
  :RETF imm16     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=2 & byte=0xca; imm16     { pop88(RIP); tmp:8=0; pop88(tmp); CS=tmp(0); RSP=RSP+imm16; return [RIP]; }
@@ -570,7 +572,7 @@
  @endif
  
  :ROL  rm8,n1        is vexMode=0 & byte=0xD0; rm8 & n1 & reg_opcode=0 ...           { CF = rm8 s< 0; rm8 = (rm8 << 1) | CF; OF = CF ^ (rm8 s< 0); }
-@@ -5171,8 +5385,16 @@
+@@ -5171,8 +5387,16 @@
  :XCHG Rmr64,Reg64   is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x87; mod=3 & Rmr64 & Reg64        { local tmp = Rmr64; Rmr64 = Reg64; Reg64 = tmp; }
  @endif
  
@@ -587,7 +589,7 @@
  @ifdef IA64
  :XLAT segWide^RBX     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & segWide & byte=0xd7; RBX          { tmp:$(SIZE)= 0; ptr8(tmp,RBX+zext(AL)); AL = *tmp; }
  @endif
-@@ -7360,9 +7582,13 @@
+@@ -7360,9 +7584,13 @@
  define pcodeop lddqu;
  :LDDQU        XmmReg, m128        is vexMode=0 &  $(PRE_F2) & byte=0x0F; byte=0xF0; XmmReg ... & m128 { XmmReg = lddqu(XmmReg, m128); }
  

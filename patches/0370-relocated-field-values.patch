@@ -1,9 +1,11 @@
 --- a/src/decompiler/loadimage.hh
 +++ b/src/decompiler/loadimage.hh
-@@ -61,6 +61,20 @@
+@@ -59,6 +59,15 @@
+   Address address;		///< Starting address of section
+   uintb size;			///< Number of bytes in section
    uint4 flags;			///< Properties of the section
- };
- 
++};
++
 +/// A decoded token field, identified by its source bytes and bit selection, not its numeric value.
 +struct InstructionField {
 +  Address source;
@@ -11,23 +13,15 @@
 +  int4 bitOffset;
 +  int4 bitSize;
 +  bool bigEndian;
-+};
-+
-+enum InstructionFieldUse {
-+  machine_value,
-+  code_reference
-+};
-+
+ };
+
  /// \brief An interface into a particular binary executable image
- ///
- /// This class provides the abstraction needed by the decompiler
-@@ -82,6 +96,9 @@
+@@ -82,6 +91,8 @@
    virtual ~LoadImage(void);	///< LoadImage destructor
    const string &getFileName(void) const; ///< Get the name of the LoadImage
    virtual void loadFill(uint1 *ptr,int4 size,const Address &addr)=0; ///< Get data from the LoadImage
-+  // False means no supplied fact. For machine_value, true denotes the unknown source cell and target is unused.
-+  // For code_reference, true supplies an independently established target, never reconstructed CPU bits.
-+  virtual bool getInstructionField(const InstructionField &field,InstructionFieldUse use,Address &target) const { return false; }
++  // True admits this exact decoded field as an unknown runtime source cell, not numeric decode bits.
++  virtual bool getInstructionField(const InstructionField &field) const { return false; }
    virtual void openSymbols(void) const; ///< Prepare to read symbols
    virtual void closeSymbols(void) const; ///< Stop reading symbols
    virtual bool getNextSymbol(LoadImageFunc &record) const; ///< Get the next symbol record
@@ -196,17 +190,17 @@
    PcodeCacher *cache;			///< Cache accumulating p-code data for the instruction
    void buildEmpty(Constructor *ct,int4 secnum);
    void generateLocation(const VarnodeTpl *vntpl,VarnodeData &vn);
-+  void applyFieldBinding(const VarnodeTpl *vntpl,VarnodeData &vn,InstructionFieldUse use);
++  void applyFieldBinding(const VarnodeTpl *vntpl,VarnodeData &vn);
    AddrSpace *generatePointer(const VarnodeTpl *vntpl,VarnodeData &vn);
    void generatePointerAdd(PcodeData *op,const VarnodeTpl *vntpl);
    void setUniqueOffset(const Address &addr);	///< Set uniquifying bits for the current instruction
 --- a/src/decompiler/sleigh.cc
 +++ b/src/decompiler/sleigh.cc
-@@ -164,6 +164,64 @@
+@@ -164,6 +164,50 @@
      vn.offset = vn.space->wrapOffset(vntpl->getOffset().fix(*walker));
  }
  
-+void SleighBuilder::applyFieldBinding(const VarnodeTpl *vntpl,VarnodeData &vn,InstructionFieldUse use)
++void SleighBuilder::applyFieldBinding(const VarnodeTpl *vntpl,VarnodeData &vn)
 +
 +{
 +  const ConstTpl &offset = vntpl->getOffset();
@@ -232,28 +226,14 @@
 +    }
 +  }
 +  combined.bitSize = combined.size * 8;
-+  Address target;
-+  bool supplied = contiguous && loader->getInstructionField(combined,use,target);
-+  if (supplied && use == code_reference) {
-+    if (offset.getSelect() != ConstTpl::v_offset || target.isInvalid())
-+      throw LowlevelError("Unrepresentable relocated code-reference field");
-+    vn.space = target.getSpace();
-+    vn.offset = target.getOffset();
-+    return;
-+  }
-+  if (use == code_reference || !binding.direct || !contiguous) {
-+    if (use == code_reference && contiguous) {
-+      Address unused;
-+      if (loader->getInstructionField(combined,machine_value,unused))
-+        supplied = true;
-+    }
++  bool supplied = contiguous && loader->getInstructionField(combined);
++  if (!binding.direct || !contiguous) {
 +    for(const InstructionField &field : fields) {
-+      Address unused;
-+      if (loader->getInstructionField(field,machine_value,unused))
++      if (loader->getInstructionField(field))
 +        supplied = true;
 +    }
 +    if (supplied)
-+      throw LowlevelError("Relocated field requires an independent target or a direct machine-value use");
++      throw LowlevelError("Relocated field requires a direct machine-value use");
 +    return;
 +  }
 +  if (!supplied)
@@ -267,37 +247,35 @@
  /// \brief Generate a pointer VarnodeData from a dynamic template (VarnodeTpl)
  ///
  /// The symbol represents a value referenced through a dynamic pointer.
-@@ -185,6 +243,7 @@
+@@ -185,6 +229,7 @@
      vn.offset = hand.offset_offset | uniqueoffset;
    else
      vn.offset = vn.space->wrapOffset(hand.offset_offset);
-+  applyFieldBinding(vntpl,vn,machine_value);
++  applyFieldBinding(vntpl,vn);
    return hand.space;
  }
  
-@@ -246,8 +305,12 @@
+@@ -246,8 +291,10 @@
        if (vn->getOffset().getSelect() == ConstTpl::v_offset_plus)
  	generatePointerAdd(load_op, vn);
      }
 -    else
 +    else {
        generateLocation(vn,invars[i]);
-+      bool codeReference = i == 0 && !vn->isRelative() &&
-+          (op->getOpcode() == CPUI_CALL || op->getOpcode() == CPUI_BRANCH || op->getOpcode() == CPUI_CBRANCH);
-+      applyFieldBinding(vn,invars[i],codeReference ? code_reference : machine_value);
++      applyFieldBinding(vn,invars[i]);
 +    }
    }
    if ((isize>0)&&(op->getIn(0)->isRelative())) {
      invars->offset += getLabelBase();
-@@ -278,6 +341,7 @@
+@@ -278,6 +325,7 @@
      else {
        thisop->outvar = cache->allocateVarnodes(1);
        generateLocation(outvn,*thisop->outvar);
-+      applyFieldBinding(outvn,*thisop->outvar,machine_value);
++      applyFieldBinding(outvn,*thisop->outvar);
      }
    }
  }
-@@ -609,6 +673,7 @@
+@@ -609,6 +657,7 @@
  void Sleigh::resolve(ParserContext &pos) const
  
  {
@@ -305,7 +283,7 @@
    loader->loadFill(pos.getBuffer(),16,pos.getAddr());
    ParserWalkerChange walker(&pos);
    pos.deallocateState(walker);	// Clear the previous resolve and initialize the walker
-@@ -670,6 +735,7 @@
+@@ -670,6 +719,7 @@
  
    ParserWalker walker(&pos);
    walker.baseState();
@@ -313,7 +291,7 @@
    while(walker.isState()) {
      ct = walker.getConstructor();
      oper = walker.getOperand();
-@@ -677,12 +743,17 @@
+@@ -677,12 +727,17 @@
      while(oper < numoper) {
        OperandSymbol *sym = ct->getOperand(oper);
        walker.pushOperand(oper);	// Descend into node
@@ -331,7 +309,7 @@
        }
        else {			// Must be an expression
  	PatternExpression *patexp = sym->getDefiningExpression();
-@@ -692,6 +763,8 @@
+@@ -692,6 +747,8 @@
  	hand.offset_space = (AddrSpace *)0;
  	hand.offset_offset = (uintb)res;
  	hand.size = 0;		// This size should not get used
@@ -340,7 +318,7 @@
        }
        walker.popOperand();
        oper += 1;
-@@ -700,8 +773,15 @@
+@@ -700,8 +757,15 @@
        ConstructTpl *templ = ct->getTempl();
        if (templ != (ConstructTpl *)0) {
  	HandleTpl *res = templ->getResult();
@@ -359,7 +337,7 @@
  	//   walker.getParentHandle().setInvalid();
 --- /dev/null
 +++ b/src/unittests/testrelocatedfields.cc
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,210 @@
 +#include "sleigh.hh"
 +#include "test.hh"
 +
@@ -369,13 +347,11 @@
 +public:
 +  vector<uint1> bytes;
 +  bool supplyValue;
-+  bool supplyTarget;
-+  bool supplyFullValue;
 +  uintb valueSource;
 +  int4 valueSize;
-+  mutable vector<pair<InstructionField,InstructionFieldUse> > queries;
++  mutable vector<InstructionField> queries;
 +  RelocatedFieldImage(const vector<uint1> &data)
-+    : LoadImage("relocated-fields"),bytes(data),supplyValue(true),supplyTarget(true),supplyFullValue(false),
++    : LoadImage("relocated-fields"),bytes(data),supplyValue(true),
 +      valueSource(0x100000916ULL),valueSize(2) {}
 +  virtual void loadFill(uint1 *ptr,int4 size,const Address &address) {
 +    for(int4 i=0;i<size;++i) {
@@ -383,19 +359,14 @@
 +      ptr[i] = index < bytes.size() ? bytes[index] : 0x90;
 +    }
 +  }
-+  virtual bool getInstructionField(const InstructionField &field,InstructionFieldUse use,Address &target) const {
-+    queries.push_back(make_pair(field,use));
++  virtual bool getInstructionField(const InstructionField &field) const {
++    queries.push_back(field);
 +    if (field.bitOffset != 0 || field.bitSize != field.size * 8 || field.bigEndian)
 +      return false;
-+    if (use == machine_value) {
-+      if (supplyFullValue && field.source.getOffset() == 0x100000914ULL && field.size == 4)
-+        return true;
-+      return supplyValue && field.source.getOffset() == valueSource && field.size == valueSize;
-+    }
-+    if (!supplyTarget || field.source.getOffset() != 0x100000914ULL || field.size != 4)
-+      return false;
-+    target = Address(field.source.getSpace(),0x100000994ULL);
-+    return true;
++    if (!supplyValue) return false;
++    if (field.size == 2 && (field.source.getOffset() == 0x100000914ULL || field.source.getOffset() == 0x100000916ULL))
++      return true;
++    return field.source.getOffset() == valueSource && field.size == valueSize;
 +  }
 +  virtual string getArchType(void) const { return "x86"; }
 +  virtual void adjustVma(long adjust) {}
@@ -456,7 +427,27 @@
 +  throw LowlevelError("Missing register write");
 +}
 +
-+// INSTR.EXE at physical 0xb13 has 9a ff ff 00 00; ne.reloc.1.10 supplies the separate source and target facts.
++static VarnodeData fieldCopyOrigin(const FieldPcodeEmit &emit,const FieldPcode &write) {
++  VarnodeData result = write.inputs[0];
++  size_t before = &write-emit.ops.data();
++  while (result.space->getType() == IPTR_INTERNAL) {
++    bool followed = false;
++    while (before != 0) {
++      const FieldPcode &op = emit.ops[--before];
++      if (!op.hasOutput || op.output.space != result.space || op.output.offset != result.offset || op.output.size != result.size)
++        continue;
++      if (op.opcode == CPUI_COPY && op.inputs.size() == 1) {
++        result = op.inputs[0];
++        followed = true;
++      }
++      break;
++    }
++    if (!followed) break;
++  }
++  return result;
++}
++
++// Both INSTR.EXE runtime components retain their source; no raw static CALL target is constructed.
 +TEST(relocated_field_far_call) {
 +  for(const vector<uint1> &bytes : vector<vector<uint1> >{
 +      {0x9a,0xff,0xff,0,0}, {0x9a,0x94,9,1,0}, {0x9a,0x94,9,0x67,0x15}}) {
@@ -470,18 +461,19 @@
 +    const FieldPcode &cs = fieldRegisterWrite(emit,translation.sleigh.getRegister("CS"));
 +    ASSERT_EQUALS(cs.opcode,CPUI_COPY);
 +    ASSERT_EQUALS(cs.inputs.size(),1);
-+    ASSERT_EQUALS(cs.inputs[0].space,translation.sleigh.getDefaultCodeSpace());
-+    ASSERT_EQUALS(cs.inputs[0].offset,0x100000916ULL);
-+    ASSERT_EQUALS(cs.inputs[0].size,2);
++    VarnodeData origin = fieldCopyOrigin(emit,cs);
++    ASSERT_EQUALS(origin.space,translation.sleigh.getDefaultCodeSpace());
++    ASSERT_EQUALS(origin.offset,0x100000916ULL);
++    ASSERT_EQUALS(origin.size,2);
 +    int4 calls = 0;
 +    int4 stores = 0;
 +    for(const FieldPcode &op : emit.ops) {
-+      if (op.opcode == CPUI_CALL) {
++      if (op.opcode == CPUI_CALLIND) {
 +        ++calls;
-+        ASSERT_EQUALS(op.inputs[0].space,translation.sleigh.getDefaultCodeSpace());
-+        ASSERT_EQUALS(op.inputs[0].offset,0x100000994ULL);
++        ASSERT_EQUALS(op.inputs[0].space,translation.sleigh.getUniqueSpace());
 +        ASSERT_EQUALS(op.inputs[0].size,6);
 +      }
++      ASSERT_NOT_EQUALS(op.opcode,CPUI_CALL);
 +      if (op.opcode == CPUI_STORE) {
 +        ++stores;
 +        ASSERT_EQUALS(op.inputs[2].size,2);
@@ -490,12 +482,14 @@
 +    ASSERT_EQUALS(calls,1);
 +    ASSERT_EQUALS(stores,2);
 +    ASSERT_EQUALS(translation.sleigh.getRegister("SP").size,2);
-+    bool fullSource = false;
++    bool offsetSource = false;
++    bool selectorSource = false;
 +    for(const auto &query : translation.image.queries) {
-+      if (query.second == code_reference && query.first.source.getOffset() == 0x100000914ULL && query.first.size == 4)
-+        fullSource = true;
++      if (query.source.getOffset() == 0x100000914ULL && query.size == 2) offsetSource = true;
++      if (query.source.getOffset() == 0x100000916ULL && query.size == 2) selectorSource = true;
 +    }
-+    ASSERT(fullSource);
++    ASSERT(offsetSource);
++    ASSERT(selectorSource);
 +  }
 +}
 +
@@ -520,28 +514,22 @@
 +TEST(relocated_field_query_miss) {
 +  FieldTranslation translation({0x9a,0x94,9,1,0});
 +  translation.image.supplyValue = false;
-+  translation.image.supplyTarget = false;
 +  FieldPcodeEmit emit;
 +  translation.sleigh.oneInstruction(emit,translation.entry());
 +  const FieldPcode &cs = fieldRegisterWrite(emit,translation.sleigh.getRegister("CS"));
-+  ASSERT_EQUALS(cs.inputs[0].space,translation.sleigh.getConstantSpace());
-+  ASSERT_EQUALS(cs.inputs[0].offset,1);
-+  ASSERT_EQUALS(emit.ops.back().opcode,CPUI_CALL);
-+  ASSERT_EQUALS(emit.ops.back().inputs[0].offset,0x100000994ULL);
-+}
-+
-+TEST(relocated_field_missing_static_target_refuses) {
-+  FieldTranslation translation({0x9a,0x94,9,1,0});
-+  translation.image.supplyTarget = false;
-+  FieldPcodeEmit emit;
-+  bool refused = false;
-+  try {
-+    translation.sleigh.oneInstruction(emit,translation.entry());
-+  } catch(LowlevelError &error) {
-+    refused = error.explain.find("independent target") != string::npos;
++  VarnodeData origin = fieldCopyOrigin(emit,cs);
++  ASSERT_EQUALS(origin.space,translation.sleigh.getConstantSpace());
++  ASSERT_EQUALS(origin.offset,1);
++  ASSERT_EQUALS(origin.size,2);
++  int4 calls = 0;
++  for(const FieldPcode &op : emit.ops) {
++    ASSERT_NOT_EQUALS(op.opcode,CPUI_CALL);
++    if (op.opcode == CPUI_CALLIND) {
++      ASSERT_EQUALS(op.inputs[0].space,translation.sleigh.getUniqueSpace());
++      ++calls;
++    }
 +  }
-+  ASSERT(refused);
-+  ASSERT(emit.ops.empty());
++  ASSERT_EQUALS(calls,1);
 +}
 +
 +TEST(relocated_field_widened_machine_value_refuses) {
@@ -554,22 +542,6 @@
 +    translation.sleigh.oneInstruction(emit,translation.entry());
 +  } catch(LowlevelError &error) {
 +    refused = error.explain.find("Unrepresentable relocated machine-value") != string::npos;
-+  }
-+  ASSERT(refused);
-+  ASSERT(emit.ops.empty());
-+}
-+
-+TEST(relocated_field_full_value_without_target_refuses) {
-+  FieldTranslation translation({0x9a,0x94,9,1,0});
-+  translation.image.supplyValue = false;
-+  translation.image.supplyTarget = false;
-+  translation.image.supplyFullValue = true;
-+  FieldPcodeEmit emit;
-+  bool refused = false;
-+  try {
-+    translation.sleigh.oneInstruction(emit,translation.entry());
-+  } catch(LowlevelError &error) {
-+    refused = error.explain.find("independent target") != string::npos;
 +  }
 +  ASSERT(refused);
 +  ASSERT(emit.ops.empty());

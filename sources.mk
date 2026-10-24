@@ -38,6 +38,7 @@ GHIDRA_DECOMPILER_SRCS = \
 	emulateutil.cc \
 	flow.cc \
 	userop.cc \
+	segmentop.cc \
 	expression.cc \
 	multiprecision.cc \
 	funcdata.cc \

@@ -1,12 +1,13 @@
 --- /dev/null
 +++ b/src/unittests/testsegmentedwide.cc
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,585 @@
 +#include "architecture.hh"
 +#include "coreaction.hh"
 +#include "emulate.hh"
 +#include "funcdata.hh"
 +#include "libdecomp.hh"
 +#include "test.hh"
++#include "xml_arch.hh"
 +
 +namespace ghidra {
 +
@@ -14,10 +15,28 @@
 +  return (selector << 32) | offset;
 +}
 +
++class FarWitnessImage : public LoadImageXml {
++public:
++  FarWitnessImage(const Element *image) : LoadImageXml("far-witness",image) {}
++  virtual bool getInstructionField(const InstructionField &field) const {
++    if (field.bigEndian || field.bitOffset != 0 || field.bitSize != field.size*8) return false;
++    return field.size == 2 && (field.source.getOffset() == 0x300000024ULL || field.source.getOffset() == 0x300000026ULL);
++  }
++};
++
++class FarWitnessArchitecture : public XmlArchitecture {
++  virtual void buildLoader(DocumentStorage &store) {
++    collectSpecFiles(*errorstream);
++    loader = new FarWitnessImage(store.getTag("binaryimage"));
++  }
++public:
++  FarWitnessArchitecture(void) : XmlArchitecture("","",&cout) {}
++};
++
 +class WideEnvironment {
 +public:
 +  Architecture *arch;
-+  WideEnvironment(const string &bytes,uintb entry = protectedCoordinate(0x1234,0x1000),const string &language = "x86:LE:16:Protected Mode:default") {
++  WideEnvironment(const string &bytes,uintb entry = protectedCoordinate(0x1234,0x1000),const string &language = "x86:LE:16:Protected Mode:default",bool farWitness = false) {
 +    startDecompilerLibrary(getenv("SLEIGHHOME"));
 +    ostringstream xml;
 +    xml << "<binaryimage arch=\"" << language << "\"><bytechunk space=\"ram\" offset=\"0x" << hex << entry;
@@ -26,21 +45,26 @@
 +    DocumentStorage store;
 +    Document *document = store.parseDocument(input);
 +    store.registerTag(document->getRoot());
-+    arch = ArchitectureCapability::getCapability("xml")->buildArchitecture("","",&cout);
++    arch = farWitness ? new FarWitnessArchitecture() : ArchitectureCapability::getCapability("xml")->buildArchitecture("","",&cout);
 +    arch->init(store);
 +  }
 +  ~WideEnvironment(void) { delete arch; }
 +};
 +
-+// The generic emulator lacks segment userops and eagerly decodes callees. Delegate the former to the real architecture and stop at the actual transfer.
-+class WideEmulator : public EmulatePcodeCache {
++// Only captured cases use this adapter, with an explicit independently observed selector-to-file-segment mapping.
++class WitnessEmulator : public EmulatePcodeCache {
 +  Architecture *arch;
 +  bool started;
++  map<uintb,uintb> observedSegments;
 +  void executeSegment(SegmentOp *segment,int4 first) {
 +    vector<uintb> inputs;
 +    inputs.push_back(memstate->getValue(currentOp->getInput(first)));
 +    inputs.push_back(memstate->getValue(currentOp->getInput(first+1)));
-+    memstate->setValue(currentOp->getOutput(),segment->execute(inputs));
++    auto found = observedSegments.find(inputs[0]);
++    if (found == observedSegments.end())
++      throw LowlevelError("No captured selector mapping for witness execution");
++    Address base(segment->getSpace(),protectedCoordinate(found->second,0));
++    memstate->setValue(currentOp->getOutput(),segment->composeReference(base,inputs[1]).getOffset());
 +  }
 +protected:
 +  virtual void executeCallother(void) {
@@ -57,8 +81,8 @@
 +  Address target;
 +  OpCode transfer;
 +  vector<Address> reads;
-+  WideEmulator(Architecture *g,MemoryState *state,BreakTable *breaks)
-+    : EmulatePcodeCache(const_cast<Translate *>(g->translate),state,breaks),arch(g),started(false),transfer(CPUI_MAX) {}
++  WitnessEmulator(Architecture *g,MemoryState *state,BreakTable *breaks,const map<uintb,uintb> &observed)
++    : EmulatePcodeCache(const_cast<Translate *>(g->translate),state,breaks),arch(g),started(false),observedSegments(observed),transfer(CPUI_MAX) {}
 +  virtual void setExecuteAddress(const Address &address) {
 +    if (!started) {
 +      EmulatePcodeCache::setExecuteAddress(address);
@@ -76,78 +100,68 @@
 +  }
 +};
 +
-+static void checkFarMemoryCall(const string &bytes,bool operand32,bool address32,uintb cellOffset,uintb ds,uintb targetOffset,uintb targetSelector,bool stackAddress = false) {
-+  WideEnvironment environment(bytes);
-+  Architecture *arch = environment.arch;
-+  AddrSpace *ram = arch->getDefaultDataSpace();
-+  MemoryImage image(ram,8,4096,arch->loader);
-+  MemoryPageOverlay memory(ram,8,4096,&image);
-+  MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
-+  MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
-+  MemoryState state(const_cast<Translate *>(arch->translate));
-+  state.setMemoryBank(&memory);
-+  state.setMemoryBank(&registers);
-+  state.setMemoryBank(&unique);
-+  BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
-+  WideEmulator emulator(arch,&state,&breaks);
-+  state.setValue("CS",0x1234);
-+  state.setValue("DS",ds);
-+  state.setValue("SS",0x6789);
-+  state.setValue("ESP",0xabcd0004);
-+  state.setValue("EAX",cellOffset);
-+  state.setValue("EBP",cellOffset);
-+  state.setValue("BX",cellOffset);
-+  int4 offsetSize = operand32 ? 4 : 2;
-+  uintb cell = protectedCoordinate(stackAddress ? 0x6789 : ds,address32 ? cellOffset : cellOffset & 0xffff);
-+  state.setValue(ram,(ds << 16) | (cellOffset & 0xffff),offsetSize,0x1111);
-+  state.setValue(ram,protectedCoordinate(ds,0x2000),offsetSize,0x2222);
-+  state.setValue(ram,cell,offsetSize,targetOffset);
-+  state.setValue(ram,cell+offsetSize,2,targetSelector);
-+  uintb stack = protectedCoordinate(0x6789,0);
-+  state.setValue(ram,stack,4,0xfeedface);
-+  emulator.setExecuteAddress(Address(ram,protectedCoordinate(0x1234,0x1000)));
-+  emulator.setHalt(false);
-+  int4 steps = 0;
-+  while (!emulator.getHalt() && steps++ < 100)
-+    emulator.executeCurrentOp();
-+  ASSERT(emulator.getHalt());
-+  ASSERT_EQUALS(emulator.transfer,CPUI_CALLIND);
-+  ASSERT_EQUALS(emulator.target,Address(ram,protectedCoordinate(targetSelector,targetOffset)));
-+  ASSERT_EQUALS(emulator.reads.size(),2);
-+  ASSERT_EQUALS(emulator.reads[0],Address(ram,cell));
-+  ASSERT_EQUALS(emulator.reads[1],Address(ram,cell+offsetSize));
-+  ASSERT_EQUALS(state.getValue("CS"),targetSelector);
-+  ASSERT_EQUALS(state.getValue("ESP"),operand32 ? 0xabcdfffc : 0xabcd0000);
-+  uintb returnAddress = protectedCoordinate(0x6789,operand32 ? 0xfffc : 0);
-+  ASSERT_EQUALS(state.getValue(ram,returnAddress,offsetSize),0x1000 + bytes.size()/2);
-+  ASSERT_EQUALS(state.getValue(ram,stack+(operand32 ? 0 : 2),2),0x1234);
-+  ASSERT_EQUALS(state.getValue("DS"),ds);
-+}
++struct WidePcode {
++  OpCode opcode;
++  VarnodeData output;
++  bool hasOutput;
++  vector<VarnodeData> inputs;
++};
 +
-+TEST(protected_wide_callf_operand32_address32) {
-+  checkFarMemoryCall("6667ff18",true,true,0x12000,0x4567,0x12345678,0x2345);
-+  checkFarMemoryCall("6667ff18",true,true,0x12000,0x4567,0x98765678,0x2345);
-+  checkFarMemoryCall("6667ff18",true,true,0x12000,0x4567,0x12345678,0x3456);
-+  checkFarMemoryCall("6667ff18",true,true,0x22000,0x4567,0x12345678,0x2345);
-+  checkFarMemoryCall("6667ff18",true,true,0x12000,0x5678,0x12345678,0x2345);
-+}
++class WidePcodeEmit : public PcodeEmit {
++public:
++  vector<WidePcode> ops;
++  virtual void dump(const Address &address,OpCode opcode,VarnodeData *out,VarnodeData *inputs,int4 size) {
++    WidePcode op = {};
++    op.opcode = opcode;
++    op.hasOutput = out != (VarnodeData *)0;
++    if (op.hasOutput) op.output = *out;
++    op.inputs.assign(inputs,inputs+size);
++    ops.push_back(op);
++  }
++};
 +
-+TEST(protected_wide_callf_operand16_address32) {
-+  checkFarMemoryCall("67ff18",false,true,0x12000,0x4567,0x5678,0x2345);
-+}
-+
-+TEST(protected_wide_callf_operand32_address16) {
-+  checkFarMemoryCall("66ff1f",true,false,0x2000,0x4567,0x12345678,0x2345);
-+}
-+
-+TEST(protected_wide_callf_operand16_address16) {
-+  checkFarMemoryCall("ff1f",false,false,0x2000,0x4567,0x5678,0x2345);
-+}
-+
-+TEST(protected_wide_callf_address32_stack_and_override) {
-+  checkFarMemoryCall("6667ff5d00",true,true,0x12000,0x4567,0x12345678,0x2345,true);
-+  checkFarMemoryCall("6667ff1c24",true,true,0xabcd0004,0x4567,0x12345678,0x2345,true);
-+  checkFarMemoryCall("66673eff5d00",true,true,0x12000,0x4567,0x12345678,0x2345);
++// These are local construction/width controls, not invented machine selector mappings.
++TEST(protected_wide_callf_memory_construction) {
++  for(const string &bytes : {"ff1f","67ff18","66ff1f","6667ff18","6667ff5d00","6667ff1c24","66673eff5d00"}) {
++    WideEnvironment environment(bytes);
++    Architecture *arch = environment.arch;
++    WidePcodeEmit emit;
++    arch->translate->oneInstruction(emit,Address(arch->getDefaultCodeSpace(),protectedCoordinate(0x1234,0x1000)));
++    VarnodeData cs = arch->translate->getRegister("CS");
++    VarnodeData memorySegment = arch->translate->getRegister(bytes == "6667ff5d00" || bytes == "6667ff1c24" ? "SS" : "DS");
++    int4 loads = 0;
++    int4 stores = 0;
++    int4 calls = 0;
++    int4 restores = 0;
++    bool addressing = false;
++    for(const WidePcode &op : emit.ops) {
++      if (op.opcode == CPUI_LOAD) {
++        ASSERT_EQUALS(op.output.size,loads == 0 && bytes.substr(0,2) == "66" ? 4 : 2);
++        ++loads;
++      }
++      if (op.opcode == CPUI_STORE) {
++        ASSERT_EQUALS(op.inputs[1].size,6);
++        ASSERT_EQUALS(op.inputs[2].size,stores != 0 && bytes.substr(0,2) == "66" ? 4 : 2);
++        ++stores;
++      }
++      if (op.opcode == CPUI_CALLOTHER && op.inputs[1].space == memorySegment.space && op.inputs[1].offset == memorySegment.offset)
++        addressing = true;
++      if (op.opcode == CPUI_CALLIND) {
++        ASSERT_EQUALS(op.inputs[0].size,6);
++        ++calls;
++      }
++      if (calls != 0 && op.hasOutput && op.output.space == cs.space && op.output.offset == cs.offset) {
++        ASSERT_EQUALS(op.opcode,CPUI_COPY);
++        ASSERT_EQUALS(op.inputs[0].space,arch->getUniqueSpace());
++        ++restores;
++      }
++    }
++    ASSERT_EQUALS(loads,2);
++    ASSERT_EQUALS(stores,2);
++    ASSERT_EQUALS(calls,1);
++    ASSERT_EQUALS(restores,1);
++    ASSERT(addressing);
++  }
 +}
 +
 +TEST(protected_wide_machine_pointer_stack_widths) {
@@ -213,10 +227,8 @@
 +  ds.val = 0x4567;
 +  arch->context->createSet(entry,entry+1).push_back(ds);
 +  uintb encoding;
-+  ASSERT_EQUALS(arch->resolveConstant(ram,0x5678,2,entry,encoding),Address(ram,protectedCoordinate(0x4567,0x5678)));
-+  ASSERT_EQUALS(encoding,0x45675678);
-+  ASSERT_EQUALS(arch->resolveConstant(ram,0x23455678,4,entry,encoding),Address(ram,protectedCoordinate(0x2345,0x5678)));
-+  ASSERT_EQUALS(encoding,0x23455678);
++  ASSERT(arch->resolveConstant(ram,0x5678,2,entry,encoding).isInvalid());
++  ASSERT(arch->resolveConstant(ram,0x23455678,4,entry,encoding).isInvalid());
 +  uintb coordinate = protectedCoordinate(0x2345,0x12345678);
 +  ASSERT_EQUALS(arch->resolveConstant(ram,coordinate,6,entry,encoding),Address(ram,coordinate));
 +  ASSERT_EQUALS(encoding,coordinate);
@@ -279,15 +291,13 @@
 +  ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
 +  ASSERT_EQUALS(fd->numCalls(),1);
 +  PcodeOp *call = fd->getCallSpecs(0)->getOp();
-+  ASSERT_EQUALS(call->numInput(),2);
-+  ASSERT_EQUALS(call->getIn(1)->getSize(),4);
-+  ASSERT(call->getIn(1)->isConstant());
-+  ASSERT_EQUALS(call->getIn(1)->getOffset(),0x23455678);
++  ASSERT_EQUALS(call->code(),CPUI_CALLIND);
 +  ostringstream text;
 +  arch->print->setOutputStream(&text);
 +  arch->print->docFunction(fd);
 +  arch->print->setOutputStream((ostream *)0);
-+  ASSERT(text.str().find("consume_callback(far_target)") != string::npos);
++  ASSERT(text.str().find("far_target") == string::npos);
++  ASSERT(text.str().find("consume_callback(") == string::npos);
 +}
 +
 +TEST(protected_wide_offset32_is_not_far_pointer) {
@@ -309,86 +319,46 @@
 +  ASSERT(conversions >= 2);
 +}
 +
-+TEST(protected_wide_direct_far_call_and_return) {
-+  for(bool returning : {false,true}) {
-+    WideEnvironment environment(returning ? "66cb" : "66679a785634124523");
++TEST(protected_wide_far_transfer_construction) {
++  for(const string &bytes : {"9a00000400","66679a785634124523","cb","66cb","ea00000400"}) {
++    WideEnvironment environment(bytes,protectedCoordinate(3,0x1000));
 +    Architecture *arch = environment.arch;
-+    AddrSpace *ram = arch->getDefaultDataSpace();
-+    MemoryImage image(ram,8,4096,arch->loader);
-+    MemoryPageOverlay memory(ram,8,4096,&image);
-+    MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
-+    MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
-+    MemoryState state(const_cast<Translate *>(arch->translate));
-+    state.setMemoryBank(&memory);
-+    state.setMemoryBank(&registers);
-+    state.setMemoryBank(&unique);
-+    BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
-+    WideEmulator emulator(arch,&state,&breaks);
-+    state.setValue("CS",0x1234);
-+    state.setValue("SS",0x6789);
-+    state.setValue("ESP",0xabcd0004);
-+    if (returning) {
-+      state.setValue(ram,protectedCoordinate(0x6789,4),4,0x12345678);
-+      state.setValue(ram,protectedCoordinate(0x6789,8),2,0x2345);
++    WidePcodeEmit emit;
++    arch->translate->oneInstruction(emit,Address(arch->getDefaultCodeSpace(),protectedCoordinate(3,0x1000)));
++    int4 transfers = 0;
++    int4 suffixWrites = 0;
++    for(const WidePcode &op : emit.ops) {
++      if (op.opcode == CPUI_CALLIND || op.opcode == CPUI_BRANCHIND || op.opcode == CPUI_RETURN) {
++        ASSERT_EQUALS(op.inputs[0].size,6);
++        ++transfers;
++      }
++      else if (transfers != 0 && op.hasOutput)
++        ++suffixWrites;
 +    }
-+    emulator.setExecuteAddress(Address(ram,protectedCoordinate(0x1234,0x1000)));
-+    emulator.setHalt(false);
-+    int4 steps = 0;
-+    while (!emulator.getHalt() && steps++ < 100)
-+      emulator.executeCurrentOp();
-+    ASSERT(emulator.getHalt());
-+    ASSERT_EQUALS(emulator.transfer,returning ? CPUI_RETURN : CPUI_CALL);
-+    ASSERT_EQUALS(emulator.target,Address(ram,protectedCoordinate(0x2345,0x12345678)));
-+    ASSERT_EQUALS(state.getValue("CS"),0x2345);
-+    ASSERT_EQUALS(state.getValue("ESP"),returning ? 0xabcd000c : 0xabcdfffc);
-+    if (!returning) {
-+      ASSERT_EQUALS(state.getValue(ram,protectedCoordinate(0x6789,0xfffc),4),0x1009);
-+      ASSERT_EQUALS(state.getValue(ram,protectedCoordinate(0x6789,0),2),0x1234);
-+    }
++    ASSERT_EQUALS(transfers,1);
++    ASSERT_EQUALS(suffixWrites,bytes.find("9a") != string::npos ? 1 : 0);
 +  }
 +}
 +
-+TEST(protected_wide_enter_operand32_stack16) {
-+  WideEnvironment environment("66c808000190");
++TEST(protected_wide_enter_operand32_construction) {
++  WideEnvironment environment("66c8080001",protectedCoordinate(1,0x1000));
 +  Architecture *arch = environment.arch;
-+  AddrSpace *ram = arch->getDefaultDataSpace();
-+  MemoryImage image(ram,8,4096,arch->loader);
-+  MemoryPageOverlay memory(ram,8,4096,&image);
-+  MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
-+  MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
-+  MemoryState state(const_cast<Translate *>(arch->translate));
-+  state.setMemoryBank(&memory);
-+  state.setMemoryBank(&registers);
-+  state.setMemoryBank(&unique);
-+  BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
-+  WideEmulator emulator(arch,&state,&breaks);
-+  state.setValue("SS",0x6789);
-+  state.setValue("DS",0x4567);
-+  state.setValue("ESP",0xabcd0008);
-+  state.setValue("EBP",0x24681357);
-+  Address entry(ram,protectedCoordinate(0x1234,0x1000));
-+  emulator.setExecuteAddress(entry);
-+  emulator.setHalt(false);
-+  int4 steps = 0;
-+  while (emulator.getExecuteAddress() == entry && steps++ < 100)
-+    emulator.executeCurrentOp();
-+  ASSERT_EQUALS(emulator.getExecuteAddress(),entry+5);
-+  ASSERT_EQUALS(state.getValue(ram,protectedCoordinate(0x6789,4),4),0x24681357);
-+  uintb frame = state.getValue(ram,protectedCoordinate(0x6789,0),4);
-+  uintb ebp = state.getValue("EBP");
-+  uintb esp = state.getValue("ESP");
-+  if (frame != 0xabcd0004 || ebp != 0xabcd0004 || esp != 0xabccfff8) {
-+    ostringstream error;
-+    error << hex << "Operand32 ENTER: saved frame=0x" << frame << ", EBP=0x" << ebp << ", ESP=0x" << esp;
-+    throw LowlevelError(error.str());
++  WidePcodeEmit emit;
++  arch->translate->oneInstruction(emit,Address(arch->getDefaultCodeSpace(),protectedCoordinate(1,0x1000)));
++  int4 stores = 0;
++  for(const WidePcode &op : emit.ops) {
++    if (op.opcode != CPUI_STORE) continue;
++    ASSERT_EQUALS(op.inputs[1].size,6);
++    ASSERT_EQUALS(op.inputs[2].size,4);
++    ++stores;
 +  }
-+  ASSERT_EQUALS(state.getValue("DS"),0x4567);
-+  ASSERT_EQUALS(state.getValue("SS"),0x6789);
++  // Raw sites include the conditional loop body, not three executed writes at nesting1.
++  ASSERT_EQUALS(stores,3);
 +}
 +
 +// Register values and payload were measured on Windows 3.11 Enhanced Mode under KVM with SS D/B clear.
 +static void checkProtectedLeave(const string &bytes,uintb expectedEsp,uintb expectedEbp) {
-+  WideEnvironment environment(bytes+"90",protectedCoordinate(0x1567,0x1000));
++  WideEnvironment environment(bytes+"90",protectedCoordinate(1,0x1000));
 +  Architecture *arch = environment.arch;
 +  AddrSpace *ram = arch->getDefaultDataSpace();
 +  MemoryImage image(ram,8,4096,arch->loader);
@@ -400,16 +370,16 @@
 +  state.setMemoryBank(&registers);
 +  state.setMemoryBank(&unique);
 +  BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
-+  WideEmulator emulator(arch,&state,&breaks);
++  WitnessEmulator emulator(arch,&state,&breaks,{{0x1567,1},{0x155f,2}});
 +  state.setValue("CS",0x1567);
 +  state.setValue("DS",0x155f);
 +  state.setValue("SS",0x155f);
 +  state.setValue("ESP",0x8001177c);
 +  state.setValue("EBP",0xda5b178c);
-+  // This cell is native consumer setup, not an observed Windows descriptor mapping.
-+  uintb cell = protectedCoordinate(0x155f,0x178c);
++  // INSTR.EXE has stack/data ordinal2; the captured runtime SS is155f. This is explicit witness normalization.
++  uintb cell = protectedCoordinate(2,0x178c);
 +  state.setValue(ram,cell,4,0xa1b2c3d4);
-+  Address entry(ram,protectedCoordinate(0x1567,0x1000));
++  Address entry(ram,protectedCoordinate(1,0x1000));
 +  emulator.setExecuteAddress(entry);
 +  emulator.setHalt(false);
 +  int4 steps = 0;
@@ -445,6 +415,110 @@
 +
 +TEST(protected_wide_leave_6667c9_stack16) {
 +  checkProtectedLeave("6667c9",0x80011790,0xa1b2c3d4);
++}
++
++// Frozen FARRET: caller1557/file3, callee154f/file4, SS1547/file5; continuation0028 and SP1754 ->1750 ->1754.
++TEST(protected_wide_captured_far_transfer_and_return) {
++  for(bool returning : {false,true}) {
++    WideEnvironment environment(returning ? "cb" : "9a00004f15",returning ? 0x400000000ULL : 0x300000023ULL,"x86:LE:16:Protected Mode:default",!returning);
++    Architecture *arch = environment.arch;
++    AddrSpace *ram = arch->getDefaultDataSpace();
++    MemoryImage image(ram,8,4096,arch->loader);
++    MemoryPageOverlay memory(ram,8,4096,&image);
++    MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
++    MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
++    MemoryState state(const_cast<Translate *>(arch->translate));
++    state.setMemoryBank(&memory);
++    state.setMemoryBank(&registers);
++    state.setMemoryBank(&unique);
++    BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
++    WitnessEmulator emulator(arch,&state,&breaks,{{0x1557,3},{0x154f,4},{0x1547,5}});
++    state.setValue("CS",returning ? 0x154f : 0x1557);
++    state.setValue("SS",0x1547);
++    state.setValue("SP",returning ? 0x1750 : 0x1754);
++    if (!returning) {
++      // Witness comparison inputs, not independently dumped loader bytes.
++      state.setValue(ram,0x300000024ULL,2,0);
++      state.setValue(ram,0x300000026ULL,2,0x154f);
++    }
++    if (returning) {
++      state.setValue(ram,0x500001750ULL,2,0x28);
++      state.setValue(ram,0x500001752ULL,2,0x1557);
++    }
++    emulator.setExecuteAddress(Address(ram,returning ? 0x400000000ULL : 0x300000023ULL));
++    emulator.setHalt(false);
++    int4 steps = 0;
++    while (!emulator.getHalt() && steps++ < 100) emulator.executeCurrentOp();
++    ASSERT(emulator.getHalt());
++    ASSERT_EQUALS(emulator.transfer,returning ? CPUI_RETURN : CPUI_CALLIND);
++    ASSERT_EQUALS(emulator.target,Address(ram,returning ? 0x300000028ULL : 0x400000000ULL));
++    ASSERT_EQUALS(state.getValue("CS"),returning ? 0x1557 : 0x154f);
++    ASSERT_EQUALS(state.getValue("SP"),returning ? 0x1754 : 0x1750);
++    ASSERT_EQUALS(state.getValue(ram,0x500001750ULL,2),0x28);
++    ASSERT_EQUALS(state.getValue(ram,0x500001752ULL,2),0x1557);
++  }
++}
++
++// SELCHAIN measured CS1567, DS155f ->1567, unchanged RPL/ZF0 and equal CS/DS reads of b37a at code1:0a15.
++TEST(protected_wide_captured_selector_chain) {
++  string bytes = "2ea1150a8cc8b9030063c88ed8a1150a90";
++  WideEnvironment environment(bytes,0x100001000ULL);
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultDataSpace();
++  MemoryImage image(ram,8,4096,arch->loader);
++  MemoryPageOverlay memory(ram,8,4096,&image);
++  MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
++  MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
++  MemoryState state(const_cast<Translate *>(arch->translate));
++  state.setMemoryBank(&memory);
++  state.setMemoryBank(&registers);
++  state.setMemoryBank(&unique);
++  BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
++  WitnessEmulator emulator(arch,&state,&breaks,{{0x1567,1},{0x155f,2}});
++  state.setValue("CS",0x1567);
++  state.setValue("DS",0x155f);
++  state.setValue(ram,0x100000a15ULL,2,0xb37a);
++  Address entry(ram,0x100001000ULL);
++  emulator.setExecuteAddress(entry);
++  emulator.setHalt(false);
++  int4 steps = 0;
++  while (emulator.getExecuteAddress() < entry+bytes.size()/2-1 && steps++ < 100) emulator.executeCurrentOp();
++  ASSERT_EQUALS(emulator.getExecuteAddress(),entry+bytes.size()/2-1);
++  ASSERT_EQUALS(state.getValue("CS"),0x1567);
++  ASSERT_EQUALS(state.getValue("DS"),0x1567);
++  ASSERT_EQUALS(state.getValue("AX"),0xb37a);
++  ASSERT_EQUALS(state.getValue("ZF"),0);
++  ASSERT_EQUALS(emulator.reads.size(),2);
++  ASSERT_EQUALS(emulator.reads[0],Address(ram,0x100000a15ULL));
++  ASSERT_EQUALS(emulator.reads[1],emulator.reads[0]);
++}
++
++// INSTR changed-RPL and SELCHAIN unchanged-RPL arithmetic observations; no selector-to-address inference is involved.
++TEST(protected_wide_captured_arpl_values) {
++  for(bool changed : {false,true}) {
++    WideEnvironment environment("63c890",0x100001000ULL);
++    Architecture *arch = environment.arch;
++    AddrSpace *ram = arch->getDefaultDataSpace();
++    MemoryImage image(ram,8,4096,arch->loader);
++    MemoryPageOverlay memory(ram,8,4096,&image);
++    MemoryPageOverlay registers(arch->getSpaceByName("register"),8,4096,(MemoryBank *)0);
++    MemoryPageOverlay unique(arch->getUniqueSpace(),8,4096,(MemoryBank *)0);
++    MemoryState state(const_cast<Translate *>(arch->translate));
++    state.setMemoryBank(&memory);
++    state.setMemoryBank(&registers);
++    state.setMemoryBank(&unique);
++    BreakTableCallBack breaks(const_cast<Translate *>(arch->translate));
++    WitnessEmulator emulator(arch,&state,&breaks,{});
++    state.setValue("AX",changed ? 0x1566 : 0x1567);
++    state.setValue("CX",changed ? 0x1567 : 3);
++    Address entry(ram,0x100001000ULL);
++    emulator.setExecuteAddress(entry);
++    emulator.setHalt(false);
++    int4 steps = 0;
++    while (emulator.getExecuteAddress() == entry && steps++ < 100) emulator.executeCurrentOp();
++    ASSERT_EQUALS(state.getValue("AX"),0x1567);
++    ASSERT_EQUALS(state.getValue("ZF"),changed ? 1 : 0);
++  }
 +}
 +
 +static void checkRealModePointerGlobal(int4 pointerSize,uintb raw) {
@@ -514,7 +588,15 @@
 +} // End namespace ghidra
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -998,7 +998,7 @@
+@@ -22,6 +22,7 @@
+ #include "printjava.hh"
+ #include "ruleaction.hh"
+ #include "test.hh"
++#include "xml_arch.hh"
+ #include <algorithm>
+
+ namespace ghidra {
+@@ -998,19 +999,18 @@
    ASSERT_EQUALS(store->getOut()->getSpace(),stack);
    ASSERT_EQUALS(store->getOut()->getOffset(),0x12);
    // A genuine literal-zero selector is not a synthetic stack reference.
@@ -523,17 +605,19 @@
    PcodeOp *realLoad = env.op(CPUI_LOAD,{env.fd->newVarnodeSpace(stack->getContain()),address},word);
    ASSERT_EQUALS(loadRule.applyOp(realLoad,*env.fd),0);
    PcodeOp *realStore = env.op(CPUI_STORE,{env.fd->newVarnodeSpace(stack->getContain()),address,env.constant(2,1)});
-@@ -1006,11 +1006,11 @@
+   ASSERT_EQUALS(storeRule.applyOp(realStore,*env.fd),0);
    ASSERT_EQUALS(realLoad->code(),CPUI_LOAD);
    ASSERT_EQUALS(realStore->code(),CPUI_STORE);
-   // The processor-owned constant address calculation still folds normally.
+-  // The processor-owned constant address calculation still folds normally.
 -  PcodeOp *fixed = env.segment(env.constant(2,0x1234),env.constant(2,0x50),env.arch->types->getBase(4,TYPE_UNKNOWN))->getDef();
++  // A numeric CPU selector alone does not identify a static analysis segment.
 +  PcodeOp *fixed = env.segment(env.constant(2,0x1234),env.constant(2,0x50),env.arch->types->getBase(6,TYPE_UNKNOWN))->getDef();
    RuleSegment segmentRule("base");
-   ASSERT_EQUALS(segmentRule.applyOp(fixed,*env.fd),1);
-   ASSERT_EQUALS(fixed->code(),CPUI_COPY);
+-  ASSERT_EQUALS(segmentRule.applyOp(fixed,*env.fd),1);
+-  ASSERT_EQUALS(fixed->code(),CPUI_COPY);
 -  ASSERT_EQUALS(fixed->getIn(0)->getOffset(),0x12340050);
-+  ASSERT_EQUALS(fixed->getIn(0)->getOffset(),0x123400000050);
++  ASSERT_EQUALS(segmentRule.applyOp(fixed,*env.fd),0);
++  ASSERT_EQUALS(fixed->code(),CPUI_SEGMENTOP);
  }
  
  TEST(segmented_array_address) {
@@ -686,7 +770,56 @@
        ASSERT(tasm31DependsOn(op->getIn(2),call->getOut()));
        savesCurrentES = true;
      }
-@@ -1767,10 +1769,11 @@
+@@ -1762,26 +1764,70 @@
+   ASSERT(output.str().find("zero_zf") != string::npos);
+ }
+
++// These exact local fixture facts retain the source-qualified call/body contract, not Windows loader behavior.
++class TasmCurrentImage : public LoadImageXml {
++  bool callPreserved;
++public:
++  TasmCurrentImage(const Element *image,bool preserved) : LoadImageXml("tasm-current",image),callPreserved(preserved) {}
++  virtual bool getInstructionField(const InstructionField &field) const {
++    if (field.bigEndian || field.bitOffset != 0 || field.bitSize != 16 || field.size != 2) return false;
++    uintb source = field.source.getOffset();
++    return source == 0x10000000f696ULL || source == 0x10000000f698ULL ||
++        source == 0x10000000f6b1ULL || source == 0x10000000f6b3ULL;
++  }
++  virtual bool getInitialReference(const Address &storage,int4 size,InitialReferenceUse use,Address &target) const {
++    if (size != 4 || use != complete_pointer_reference ||
++        (storage.getOffset() != 0x10000000f696ULL && storage.getOffset() != 0x10000000f6b1ULL))
++      return false;
++    target = Address(storage.getSpace(),0x0f900000074bULL);
++    return true;
++  }
++  virtual bool isCallPreservedStorage(const Address &storage,int4 size) const {
++    if (!callPreserved || storage.getSpace()->getName() != "ram") return false;
++    uintb source = storage.getOffset();
++    return (size == 2 && (source == 0x10000000f696ULL || source == 0x10000000f698ULL ||
++        source == 0x10000000f6b1ULL || source == 0x10000000f6b3ULL)) ||
++        (size == 4 && (source == 0x10000000f696ULL || source == 0x10000000f6b1ULL));
++  }
++  virtual void getReadonly(RangeList &list) const {
++    LoadImageXml::getReadonly(list);
++    AddrSpace *ram = list.getFirstRange()->getSpace();
++    list.removeRange(ram,0x10000000f696ULL,0x10000000f699ULL);
++    list.removeRange(ram,0x10000000f6b1ULL,0x10000000f6b4ULL);
++  }
++};
++
++class TasmCurrentArchitecture : public XmlArchitecture {
++  bool callPreserved;
++  virtual void buildLoader(DocumentStorage &store) {
++    collectSpecFiles(*errorstream);
++    loader = new TasmCurrentImage(store.getTag("binaryimage"),callPreserved);
++  }
++public:
++  TasmCurrentArchitecture(bool preserved) : XmlArchitecture("","",&cout),callPreserved(preserved) {}
++};
++
+ // Actual TI04 F687 and074B bodies with their explicit source-qualified contracts, not synthetic leaf behavior.
+-static void checkTasm31CurrentBody(const string &language)
++static void checkTasm31CurrentBody(const string &language,bool callPreserved = true)
  
  {
    SegmentedEnvironment::initialize();
@@ -700,7 +833,11 @@
      "<bytechunk space=\"ram\" offset=\"0x" << hex << leafOffset << "\" readonly=\"true\">f606c343807505c606984501cb</bytechunk></binaryimage>";
    istringstream image(imageText.str());
    DocumentStorage store;
-@@ -1781,7 +1784,7 @@
+   Document *doc = store.parseDocument(image);
+   store.registerTag(doc->getRoot());
+-  unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
++  unique_ptr<Architecture> arch(language == "Protected Mode" ? new TasmCurrentArchitecture(callPreserved) : ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
+   arch->init(store);
    AddrSpace *ram = arch->getDefaultCodeSpace();
    Scope *global = arch->symboltab->getGlobalScope();
    Funcdata *leaf = global->addFunction(Address(ram,leafOffset),"tasm31_conditional_store_leaf")->getFunction();
@@ -709,7 +846,21 @@
    Datatype *byte = arch->types->getBase(1,TYPE_UINT);
    Datatype *word = arch->types->getBase(2,TYPE_UINT);
    Datatype *state = qualifiedRecord(arch.get(),"Tasm31CurrentState2",2,{TypeField(0,0,"zero_zf",byte),TypeField(1,1,"al",byte)});
-@@ -1842,8 +1845,8 @@
+@@ -1822,6 +1868,13 @@
+   arch->allacts.getCurrent()->reset(*current);
+   ASSERT(arch->allacts.getCurrent()->perform(*current) >= 0);
+   ASSERT_EQUALS(current->numCalls(),2);
++  if (language == "Protected Mode" && !callPreserved) {
++    ASSERT_EQUALS(current->getCallSpecs(0)->getEntryAddress(),leaf->getAddress());
++    ASSERT_EQUALS(current->getCallSpecs(0)->getModelName(),"tasm31_conditional_store_16far");
++    ASSERT_EQUALS(current->getCallSpecs(1)->getOp()->code(),CPUI_CALLIND);
++    ASSERT(current->getCallSpecs(1)->getEntryAddress().isInvalid());
++    return;
++  }
+   for(int4 i=0;i<current->numCalls();++i) {
+     FuncCallSpecs *call = current->getCallSpecs(i);
+     ASSERT_EQUALS(call->getEntryAddress(),leaf->getAddress());
+@@ -1842,8 +1895,8 @@
    for(PcodeOpTree::const_iterator iter=current->beginOpAll();iter!=current->endOpAll();++iter) {
      PcodeOp *op = (*iter).second;
      if (op->isDead()) continue;
@@ -720,7 +871,18 @@
      if (op->code() == CPUI_RETURN) {
        ASSERT_EQUALS(op->numInput(),2);
        ASSERT_EQUALS(op->getIn(1)->getSize(),2);
-@@ -1877,7 +1880,7 @@
+@@ -1858,6 +1911,10 @@
+
+ TEST(tasm31_current_body_protected) {
+   checkTasm31CurrentBody("Protected Mode");
++}
++
++TEST(tasm31_current_body_protected_unpreserved) {
++  checkTasm31CurrentBody("Protected Mode",false);
+ }
+
+ TEST(tasm31_current_body_real) {
+@@ -1877,7 +1934,7 @@
    // The caller supplies a qualified resume; these decoded bytes test the operation, not helper/prefix qualification.
    for(int4 length=7;length>=6;--length) {
      istringstream image(string(R"(<binaryimage arch="x86:LE:16:Protected Mode:default">
@@ -729,7 +891,7 @@
          (length == 7 ? "07" : "06") + R"(00000000000040b83412c3</bytechunk>
  </binaryimage>)");
      DocumentStorage store;
-@@ -1886,10 +1889,10 @@
+@@ -1886,10 +1943,10 @@
      unique_ptr<Architecture> arch(ArchitectureCapability::getCapability("xml")->buildArchitecture("", "", &cout));
      arch->init(store);
      AddrSpace *ram = arch->getDefaultCodeSpace();
@@ -743,7 +905,7 @@
      Scope *global = arch->symboltab->getGlobalScope();
      global->addFunction(target,"inline_consumer");
      Funcdata *fd = global->addFunction(callAddress,"inline_caller")->getFunction();
-@@ -1945,7 +1948,7 @@
+@@ -1945,7 +2002,7 @@
            pushedAdjacentReturn = true;
        }
        if (op->code() == CPUI_RETURN) {

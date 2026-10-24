@@ -1,0 +1,1028 @@
+--- a/src/Processors/x86/data/languages/ia.sinc
++++ b/src/Processors/x86/data/languages/ia.sinc
+@@ -1115,7 +1115,7 @@
+ 
+ currentCS: CS is protectedMode=0 & CS { tmp:4 = (inst_next >> 4) & 0xf000; CS = tmp:2; export CS; }
+ @ifdef PROTECTED16
+-currentCS: CS is protectedMode=1 & CS { tmp:6 = inst_next >> 32; CS = tmp:2; export CS; }
++currentCS: CS is protectedMode=1 & CS { export CS; }
+ @else
+ currentCS: CS is protectedMode=1 & CS { tmp:4 = (inst_next >> 16) & 0xffff; CS = tmp:2; export CS; }
+ @endif
+@@ -2736,8 +2736,13 @@
+ @endif
+ 
+ #ARPL is not encodable in 64-bit mode
++@ifdef PROTECTED16
++:ARPL rm16,Reg16    is $(LONGMODE_OFF) & vexMode=0 & bit64=0 & byte=0x63; rm16 & Reg16 ...                { local rpldest=rm16&3; local rplsrc=Reg16&3; local rpldiff=rplsrc-rpldest;
++                                          ZF = rpldiff s> 0; rm16 = (rm16 & 0xfffc) | ((rpldest + (zext(ZF) * rpldiff)) & 3); }
++@else
+ :ARPL rm16,Reg16    is $(LONGMODE_OFF) & vexMode=0 & bit64=0 & byte=0x63; rm16 & Reg16 ...                { local rpldest=rm16&3; local rplsrc=Reg16&3; local rpldiff=rplsrc-rpldest;
+                                           ZF = rpldiff s> 0; rm16 = rm16 + (zext(ZF) * rpldiff); }
++@endif
+ 
+ :BOUND Reg16,m16    is $(LONGMODE_OFF) & vexMode=0 & bit64=0 & opsize=0 & byte=0x62; m16 & Reg16 ...      { }
+ :BOUND Reg32,m32    is $(LONGMODE_OFF) & vexMode=0 & bit64=0 & opsize=1 & byte=0x62; m32 & Reg32 ...      { }
+@@ -3101,9 +3106,10 @@
+ 
+ # direct far calls generate an opcode undefined exception in x86-64
+ @ifdef PROTECTED16
+-:CALLF ptr1616 is vexMode=0 & opsize=0 & byte=0x9a; ptr1616 { push22(CS); build ptr1616; push22(&:2 inst_next); call [ptr1616]; }
+-:CALLF ptr1632 is vexMode=0 & opsize=1 & byte=0x9a; ptr1632 { pushseg44(CS); build ptr1632; push24(&:4 inst_next); call [ptr1632]; }
++:CALLF ptr1616 is vexMode=0 & opsize=0 & byte=0x9a; ptr1616 { local callerCS:2 = CS; push22(CS); build ptr1616; push22(&:2 inst_next); call [ptr1616]; CS = callerCS; }
++:CALLF ptr1632 is vexMode=0 & opsize=1 & byte=0x9a; ptr1632 { local callerCS:2 = CS; pushseg44(CS); build ptr1632; push24(&:4 inst_next); call [ptr1632]; CS = callerCS; }
+ :CALLF Mem is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=3 ... {
++  local callerCS:2 = CS;
+   local offset:2 = *:2 Mem;
+   local selector:2 = *:2 (Mem+2);
+   local dest:6 = segment(selector,offset);
+@@ -3111,8 +3117,10 @@
+   push22(&:2 inst_next);
+   CS = selector;
+   call [dest];
++  CS = callerCS;
+ }
+ :CALLF Mem is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=3 ... {
++  local callerCS:2 = CS;
+   local offset:4 = *:4 Mem;
+   local selector:2 = *:2 (Mem+4);
+   local dest:6 = segment(selector,offset);
+@@ -3120,6 +3128,7 @@
+   push24(&:4 inst_next);
+   CS = selector;
+   call [dest];
++  CS = callerCS;
+ }
+ @else
+ :CALLF ptr1616      is vexMode=0 & addrsize=0 & opsize=0 & byte=0x9a; ptr1616           { push22(CS); build ptr1616; push22(&:2 inst_next); call ptr1616; }
+--- a/src/decompiler/Makefile
++++ b/src/decompiler/Makefile
+@@ -87,7 +87,7 @@
+ # Additional core files for any projects that decompile
+ DECCORE=capability architecture options graph cover block cast typeop database cpool \
+ 	comment stringmanage modelrules fspec action loadimage grammar varnode op type \
+-	variable varmap jumptable emulate emulateutil flow userop expression multiprecision \
++	variable varmap jumptable emulate emulateutil flow segmentop userop expression multiprecision \
+ 	funcdata funcdata_block funcdata_op funcdata_varnode unionresolve pcodeinject \
+ 	heritage prefersplit rangeutil ruleaction subflow blockaction merge double \
+ 	transform constseq bitfield coreaction condexe override dynamic crc32 prettyprint \
+--- a/src/decompiler/architecture.cc
++++ b/src/decompiler/architecture.cc
+@@ -1471,12 +1471,14 @@
+ Address SegmentedResolver::resolve(uintb val,int4 sz,const Address &point,uintb &fullEncoding)
+ 
+ {
+-  bool wideSegmented = segop->hasFarPointerSupport() && spc->getAddrSize() > glb->types->getSizeOfAltPointer();
+-  if (wideSegmented && (sz < 0 || sz == spc->getAddrSize())) {
+-    fullEncoding = val;
+-    return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
+-  }
+-  int4 innersz = wideSegmented ? glb->types->getSizeOfPointer() : segop->getInnerSize();
++  if (segop->usesStaticReferences()) {
++    if (sz < 0 || sz == spc->getAddrSize()) {
++      fullEncoding = val;
++      return Address(spc,AddrSpace::addressToByte(val,spc->getWordSize()));
++    }
++    return Address();
++  }
++  int4 innersz = segop->getInnerSize();
+   if (sz >= 0 && sz <= innersz) { // If -sz- matches the inner size, consider the value a "near" pointer
+   // In this case the address offset is not fully specified
+   // we check if the rest is stored in a context variable
+--- a/src/decompiler/heritage.cc
++++ b/src/decompiler/heritage.cc
+@@ -1523,6 +1523,7 @@
+   uint4 effecttype;
+ 
+   bool holdind = ((fl&Varnode::addrtied)!=0);
++  bool callPreserved = fd->getArch()->loader->isCallPreservedStorage(addr,size);
+   for(int4 i=0;i<fd->numCalls();++i) {
+     fc = fd->getCallSpecs(i);
+     if (fc->getOp()->isAssignment()) {
+@@ -1582,6 +1583,8 @@
+       else if (inputCharacter == ParamEntry::contained_by)	// Call may be using part of this range as an input parameter
+ 	guardCallOverlappingInput(fc, addr, transAddr, size);
+     }
++    if (effecttype == EffectRecord::unknown_effect && callPreserved)
++      effecttype = EffectRecord::unaffected;
+     // We do not guard the call if the effect is "unaffected" or "reload"
+     if ((effecttype == EffectRecord::unknown_effect)||(effecttype == EffectRecord::return_address)) {
+       indop = fd->newIndirectOp(fc->getOp(),addr,size,0);
+--- a/src/decompiler/loadimage.hh
++++ b/src/decompiler/loadimage.hh
+@@ -68,6 +68,11 @@
+   int4 bitOffset;
+   int4 bitSize;
+   bool bigEndian;
++};
++
++enum InitialReferenceUse {
++  selector_reference,
++  complete_pointer_reference
+ };
+ 
+ /// \brief An interface into a particular binary executable image
+@@ -93,6 +98,13 @@
+   virtual void loadFill(uint1 *ptr,int4 size,const Address &addr)=0; ///< Get data from the LoadImage
+   // True admits this exact decoded field as an unknown runtime source cell, not numeric decode bits.
+   virtual bool getInstructionField(const InstructionField &field) const { return false; }
++  // A true result supplies an independently justified initial fact for this exact storage range.
++  // Selector targets identify a static segment base; complete-pointer targets identify the full address.
++  // Mutable cells require a valid fact at function entry, not merely a loader relocation. Unknown is false.
++  virtual bool getInitialReference(const Address &storage,int4 size,InitialReferenceUse use,Address &target) const { return false; }
++  // True independently preserves this exact storage range across otherwise unknown call effects.
++  // This supplies no value or target and does not override explicit writes or known call effects.
++  virtual bool isCallPreservedStorage(const Address &storage,int4 size) const { return false; }
+   virtual void openSymbols(void) const; ///< Prepare to read symbols
+   virtual void closeSymbols(void) const; ///< Stop reading symbols
+   virtual bool getNextSymbol(LoadImageFunc &record) const; ///< Get the next symbol record
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -1865,15 +1865,14 @@
+   if (segment != (SegmentOp *)0 && spc->getAddrSize() > glb->types->getSizeOfAltPointer()) {
+     if (ct->getSize() <= glb->types->getSizeOfPointer()) {
+       if (op == (const PcodeOp *)0) return false;
+-      uintb selector = op->getAddr().getOffset() >> (8 * segment->getInnerSize());
+-      vector<uintb> inputs {selector,val};
+-      address = Address(spc,AddrSpace::addressToByte(segment->execute(inputs),spc->getWordSize()));
++      address = segment->composeReference(op->getAddr(),val);
+     }
+     else {
+       uintb fullEncoding;
+       address = glb->resolveConstant(spc,val,ct->getSize(),op == (const PcodeOp *)0 ? Address() : op->getAddr(),fullEncoding);
+     }
+   }
++  if (address.isInvalid()) return false;
+   fd = glb->symboltab->getGlobalScope()->queryFunction(address);
+   if (fd != (Funcdata *)0) {
+     pushAtom(Atom(fd->getDisplayName(),functoken,EmitMarkup::funcname_color,op,fd));
+--- a/src/decompiler/ruleaction.cc
++++ b/src/decompiler/ruleaction.cc
+@@ -9035,7 +9035,17 @@
+   Varnode *vn1 = op->getIn(1);
+   Varnode *vn2 = op->getIn(2);
+ 
+-  if (vn1->isConstant() && vn2->isConstant()) {
++  if (segdef->usesStaticReferences()) {
++    Address target;
++    if (segdef->resolveReference(data,vn1,vn2,target)) {
++      data.opRemoveInput(op,2);
++      data.opRemoveInput(op,1);
++      data.opSetInput(op,data.newConstant(op->getOut()->getSize(),AddrSpace::byteToAddress(target.getOffset(),target.getSpace()->getWordSize())),0);
++      data.opSetOpcode(op,CPUI_COPY);
++      return 1;
++    }
++  }
++  else if (vn1->isConstant() && vn2->isConstant()) {
+     vector<uintb> bindlist;
+     bindlist.push_back(vn1->getOffset());
+     bindlist.push_back(vn2->getOffset());
+@@ -9046,7 +9056,7 @@
+     data.opSetOpcode(op,CPUI_COPY);
+     return 1;
+   }
+-  else if (segdef->hasFarPointerSupport()) {
++  if (segdef->hasFarPointerSupport()) {
+     if (!contiguous_test(vn1,vn2)) return 0;
+     Varnode *whole = findContiguousWhole(data,vn1,vn2);
+     if (whole == (Varnode *)0) return 0;
+--- /dev/null
++++ b/src/decompiler/segmentop.cc
+@@ -0,0 +1,349 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#include "userop.hh"
++#include "funcdata.hh"
++
++namespace ghidra {
++
++/// \param nm is the low-level name of the segment operation
++/// \param g is the owning Architecture for this instance of the segment operation
++/// \param ind is the constant id identifying the specific CALLOTHER variant
++SegmentOp::SegmentOp(const string &nm,Architecture *g,int4 ind)
++  : TermPatternOp(nm,g,segment,ind)
++{
++  constresolve.space = (AddrSpace *)0;
++}
++
++bool SegmentOp::unify(Funcdata &data,PcodeOp *op,
++				 vector<Varnode *> &bindlist) const
++{
++  Varnode *basevn,*innervn;
++
++  // Segmenting is done by a user defined p-code op, so this is what we look for
++  // The op must have innervn and basevn (if base is present) as inputs
++  // so there isn't much to follow. The OpFollow arrays are no
++  // longer needed for unification but are needed to provide
++  // a definition for the userop
++  if (op->code() != CPUI_CALLOTHER) return false;
++  if (op->getIn(0)->getOffset() != useropindex) return false;
++  if (op->numInput() != 3) return false;
++  innervn = op->getIn(1);
++  if (baseinsize != 0) {
++    basevn = op->getIn(1);
++    innervn = op->getIn(2);
++    if (basevn->isConstant())
++      basevn = data.newConstant(baseinsize,basevn->getOffset());
++    bindlist[0] = basevn;
++  }
++  else
++    bindlist[0] = (Varnode *)0;
++  bindlist[1] = innervn;
++  return true;
++}
++
++uintb SegmentOp::execute(const vector<uintb> &input) const
++
++{
++  if (usesStaticReferences())
++    throw LowlevelError("Numeric selector evaluation is unavailable in a static segmented address space");
++  ExecutablePcode *pcodeScript = (ExecutablePcode *)glb->pcodeinjectlib->getPayload(injectId);
++  return pcodeScript->evaluate(input);
++}
++
++void SegmentOp::decode(Decoder &decoder)
++
++{
++  uint4 elemId = decoder.openElement(ELEM_SEGMENTOP);
++  spc = (AddrSpace *)0;
++  injectId = -1;
++  baseinsize = 0;
++  innerinsize = 0;
++  supportsfarpointer = false;
++  name = "segment"; 		// Default name, might be overridden by userop attribute
++  for(;;) {
++    uint4 attribId = decoder.getNextAttributeId();
++    if (attribId == 0) break;
++    if (attribId == ATTRIB_SPACE)
++      spc = decoder.readSpace();
++    else if (attribId == ATTRIB_FARPOINTER)
++      supportsfarpointer = true;
++    else if (attribId == ATTRIB_USEROP) {	// Based on existing sleigh op
++      name = decoder.readString();
++    }
++  }
++  if (spc == (AddrSpace *)0)
++    throw LowlevelError("<segmentop> expecting space attribute");
++  UserPcodeOp *otherop = glb->userops.getOp(name);
++  if (otherop == (UserPcodeOp *)0)
++    throw LowlevelError("<segmentop> unknown userop " + name);
++  useropindex = otherop->getIndex();
++  if (dynamic_cast<UnspecializedPcodeOp *>(otherop) == (UnspecializedPcodeOp *)0)
++    throw LowlevelError("Redefining userop "+name);
++
++  for(;;) {
++    uint4 subId = decoder.peekElement();
++    if (subId == 0) break;
++    if (subId==ELEM_CONSTRESOLVE) {
++      int4 sz;
++      decoder.openElement();
++      if (decoder.peekElement() != 0) {
++	Address addr = Address::decode(decoder,sz);
++	constresolve.space = addr.getSpace();
++	constresolve.offset = addr.getOffset();
++	constresolve.size = sz;
++      }
++      decoder.closeElement(subId);
++    }
++    else if (subId == ELEM_PCODE) {
++      string nm = name + "_pcode";
++      string source = "cspec";
++      injectId = glb->pcodeinjectlib->decodeInject(source, nm, InjectPayload::EXECUTABLEPCODE_TYPE, decoder);
++    }
++  }
++  decoder.closeElement(elemId);
++  if (injectId < 0)
++    throw LowlevelError("Missing <pcode> child in <segmentop> tag");
++  InjectPayload *payload = glb->pcodeinjectlib->getPayload(injectId);
++  if (payload->sizeOutput() != 1)
++    throw LowlevelError("<pcode> child of <segmentop> tag must declare one <output>");
++  if (payload->sizeInput() == 1) {
++    innerinsize = payload->getInput(0).getSize();
++  }
++  else if (payload->sizeInput() == 2) {
++    baseinsize = payload->getInput(0).getSize();
++    innerinsize = payload->getInput(1).getSize();
++  }
++  else
++    throw LowlevelError("<pcode> child of <segmentop> tag must declare one or two <input> tags");
++}
++
++bool SegmentOp::usesStaticReferences(void) const
++
++{
++  return supportsfarpointer && baseinsize == 2 && innerinsize == 4 && spc->getAddrSize() == 6;
++}
++
++Address SegmentOp::composeReference(const Address &segment,uintb offset) const
++
++{
++  if (!usesStaticReferences() || segment.getSpace() != spc || offset > calc_mask(innerinsize))
++    throw LowlevelError("Invalid static segment coordinate");
++  uintb base = segment.getOffset() & ~calc_mask(innerinsize);
++  return Address(spc,base | offset);
++}
++
++namespace {
++
++// An exact initial storage slice and, independently, a justified selector identity.
++struct SegmentReference {
++  Address source;
++  Address segment;
++  int4 selectorOffset;
++  uintb changedMask; ///< Bits of this slice possibly changed from its initial source
++  SegmentReference(void) : selectorOffset(0),changedMask(0) {}
++};
++
++class SegmentReferenceQuery {
++  typedef pair<Varnode *,pair<int4,int4> > Field;
++  Funcdata &data;
++  const SegmentOp &segment;
++  map<Field,SegmentReference> results;
++  set<Field> active;
++  SegmentReference inputReference(Varnode *vn,int4 offset,int4 size) {
++    SegmentReference result;
++    if (data.findVarnodeInput(vn->getSize(),vn->getAddr()) != vn || !data.isHeritaged(vn))
++      return result;
++    const VarnodeData &cs = data.getArch()->translate->getRegister("CS");
++    if (vn->getSpace() == cs.space && vn->getOffset() == cs.offset && vn->getSize() == cs.size && cs.size == 2) {
++      const Address &entry = data.getAddress();
++      if (entry.getSpace() == segment.getSpace()) {
++        result.segment = segment.composeReference(entry,0);
++        result.selectorOffset = offset;
++      }
++      return result;
++    }
++    if (vn->getSpace() != segment.getSpace())
++      return result;
++    int4 byteOffset = vn->getSpace()->isBigEndian() ? vn->getSize()-offset-size : offset;
++    result.source = vn->getAddr()+byteOffset;
++    if (vn->getSize() == 2) {
++      Address target;
++      if (data.getArch()->loader->getInitialReference(vn->getAddr(),2,selector_reference,target) &&
++          !target.isInvalid() && target.getSpace() == segment.getSpace() &&
++          (target.getOffset() & calc_mask(segment.getInnerSize())) == 0) {
++        result.segment = target;
++        result.selectorOffset = offset;
++      }
++    }
++    return result;
++  }
++  SegmentReference follow(Varnode *vn,int4 offset,int4 size) {
++    SegmentReference unknown;
++    if (vn->isInput())
++      return inputReference(vn,offset,size);
++    if (!vn->isWritten())
++      return unknown;
++    PcodeOp *op = vn->getDef();
++    switch(op->code()) {
++    case CPUI_COPY:
++      return trace(op->getIn(0),offset,size);
++    case CPUI_SUBPIECE:
++      if (!op->getIn(1)->isConstant()) return unknown;
++      if (op->getIn(1)->getOffset() > (uintb)op->getIn(0)->getSize()) return unknown;
++      return trace(op->getIn(0),offset + op->getIn(1)->getOffset(),size);
++    case CPUI_INT_ZEXT:
++      return trace(op->getIn(0),offset,size);
++    case CPUI_PIECE: {
++      int4 lowSize = op->getIn(1)->getSize();
++      if (offset >= lowSize)
++        return trace(op->getIn(0),offset-lowSize,size);
++      if (offset+size <= lowSize)
++        return trace(op->getIn(1),offset,size);
++      SegmentReference low = trace(op->getIn(1),offset,lowSize-offset);
++      SegmentReference high = trace(op->getIn(0),0,offset+size-lowSize);
++      SegmentReference result;
++      int4 lowBytes = lowSize-offset;
++      int4 highBytes = size-lowBytes;
++      result.changedMask = low.changedMask | (high.changedMask << (8*lowBytes));
++      if (!low.source.isInvalid() && !high.source.isInvalid()) {
++        if (segment.getSpace()->isBigEndian()) {
++          if (high.source+highBytes == low.source) result.source = high.source;
++        }
++        else if (low.source+lowBytes == high.source)
++          result.source = low.source;
++      }
++      if (!low.segment.isInvalid() && low.segment == high.segment && high.selectorOffset == low.selectorOffset+lowBytes) {
++        result.segment = low.segment;
++        result.selectorOffset = low.selectorOffset;
++      }
++      return result;
++    }
++    case CPUI_MULTIEQUAL: {
++      SegmentReference result;
++      for(int4 i=0;i<op->numInput();++i) {
++        SegmentReference next = trace(op->getIn(i),offset,size);
++        if (i == 0)
++          result = next;
++        else {
++          result.changedMask |= next.changedMask;
++          if (result.source != next.source) result.source = Address();
++          if (result.segment != next.segment || result.selectorOffset != next.selectorOffset)
++            result.segment = Address();
++        }
++      }
++      return result;
++    }
++    case CPUI_INT_AND:
++    case CPUI_INT_OR:
++      if (vn->getSize() != 2) return unknown;
++      for(int4 i=0;i<2;++i) {
++        Varnode *other = op->getIn(1-i);
++        if (op->code() == CPUI_INT_AND) {
++          if (!other->isConstant() || (other->getOffset() & 0xfffc) != 0xfffc) continue;
++        }
++        else if ((other->getNZMask() & 0xfffc) != 0)
++          continue;
++        SegmentReference result = trace(op->getIn(i),0,2);
++        uintb changed = op->code() == CPUI_INT_AND ? ~other->getOffset() : other->getNZMask();
++        result.changedMask |= changed & 0xffff;
++        if (!result.source.isInvalid())
++          result.source = result.source + (segment.getSpace()->isBigEndian() ? 2-offset-size : offset);
++        if (!result.segment.isInvalid() && result.selectorOffset == 0 && (result.changedMask & 0xfffc) == 0)
++          result.selectorOffset = offset;
++        else
++          result.segment = Address();
++        result.changedMask = (result.changedMask >> (8*offset)) & calc_mask(size);
++        return result;
++      }
++      return unknown;
++    default:
++      // LOAD must first pass through normal memory/heritage handling; INDIRECT is not a copy.
++      return unknown;
++    }
++  }
++public:
++  SegmentReferenceQuery(Funcdata &fd,const SegmentOp &op) : data(fd),segment(op) {}
++  SegmentReference trace(Varnode *vn,int4 offset,int4 size) {
++    SegmentReference unknown;
++    if (offset < 0 || size <= 0 || offset > vn->getSize() || size > vn->getSize()-offset)
++      return unknown;
++    Field field = make_pair(vn,make_pair(offset,size));
++    auto found = results.find(field);
++    if (found != results.end()) return found->second;
++    if (active.size() >= 256 || !active.insert(field).second)
++      return unknown;
++    SegmentReference result = follow(vn,offset,size);
++    active.erase(field);
++    results.insert(make_pair(field,result));
++    return result;
++  }
++};
++
++} // End anonymous namespace
++
++bool SegmentOp::resolveReference(Funcdata &data,Varnode *base,Varnode *inner,Address &target) const
++
++{
++  if (!usesStaticReferences() || data.getHeritagePass() == 0 || base->getSize() != 2)
++    return false;
++  SegmentReferenceQuery query(data,*this);
++  SegmentReference reference = query.trace(base,0,2);
++  if ((reference.changedMask & 0xfffc) != 0) return false;
++  Address selector = reference.segment;
++  if (selector.isInvalid() && !reference.source.isInvalid()) {
++    if (!glb->loader->getInitialReference(reference.source,2,selector_reference,selector))
++      selector = Address();
++  }
++  if (inner->isConstant() && inner->getSize() <= innerinsize && reference.selectorOffset == 0 &&
++      !selector.isInvalid() && selector.getSpace() == spc && (selector.getOffset() & calc_mask(innerinsize)) == 0) {
++    target = composeReference(selector,inner->getOffset());
++    return true;
++  }
++  if (reference.source.isInvalid()) return false;
++  for(int4 offsetSize : {2,4}) {
++    if (inner->getSize() < offsetSize) continue;
++    if (inner->getSize() > offsetSize && (inner->getNZMask() & ~calc_mask(offsetSize)) != 0) {
++      Varnode *extension = inner;
++      set<Varnode *> visited;
++      while (extension->getSize() > offsetSize && extension->isWritten() && visited.insert(extension).second) {
++        OpCode code = extension->getDef()->code();
++        if (code != CPUI_COPY && code != CPUI_INT_ZEXT) break;
++        extension = extension->getDef()->getIn(0);
++      }
++      if (extension->getSize() > offsetSize) continue;
++    }
++    SegmentReference low = query.trace(inner,0,offsetSize);
++    if (low.source.isInvalid() || low.changedMask != 0) continue;
++    Address start;
++    if (spc->isBigEndian()) {
++      if (reference.source+2 != low.source) continue;
++      start = reference.source;
++    }
++    else {
++      if (low.source+offsetSize != reference.source) continue;
++      start = low.source;
++    }
++    Address resolved;
++    if (glb->loader->getInitialReference(start,offsetSize+2,complete_pointer_reference,resolved) &&
++        !resolved.isInvalid() && resolved.getSpace() == spc) {
++      target = resolved;
++      return true;
++    }
++  }
++  return false;
++}
++
++} // End namespace ghidra
+--- a/src/decompiler/userop.cc
++++ b/src/decompiler/userop.cc
+@@ -204,116 +204,6 @@
+ 
+ {
+   return op->getIn(2)->getSize(); // Get size from the 3rd parameter of write function
+-}
+-
+-/// \param nm is the low-level name of the segment operation
+-/// \param g is the owning Architecture for this instance of the segment operation
+-/// \param ind is the constant id identifying the specific CALLOTHER variant
+-SegmentOp::SegmentOp(const string &nm,Architecture *g,int4 ind)
+-  : TermPatternOp(nm,g,segment,ind)
+-{
+-  constresolve.space = (AddrSpace *)0;
+-}
+-
+-bool SegmentOp::unify(Funcdata &data,PcodeOp *op,
+-				 vector<Varnode *> &bindlist) const
+-{
+-  Varnode *basevn,*innervn;
+-
+-  // Segmenting is done by a user defined p-code op, so this is what we look for
+-  // The op must have innervn and basevn (if base is present) as inputs
+-  // so there isn't much to follow. The OpFollow arrays are no
+-  // longer needed for unification but are needed to provide
+-  // a definition for the userop
+-  if (op->code() != CPUI_CALLOTHER) return false;
+-  if (op->getIn(0)->getOffset() != useropindex) return false;
+-  if (op->numInput() != 3) return false;
+-  innervn = op->getIn(1);
+-  if (baseinsize != 0) {
+-    basevn = op->getIn(1);
+-    innervn = op->getIn(2);
+-    if (basevn->isConstant())
+-      basevn = data.newConstant(baseinsize,basevn->getOffset());
+-    bindlist[0] = basevn;
+-  }
+-  else
+-    bindlist[0] = (Varnode *)0;
+-  bindlist[1] = innervn;
+-  return true;
+-}
+-
+-uintb SegmentOp::execute(const vector<uintb> &input) const
+-
+-{
+-  ExecutablePcode *pcodeScript = (ExecutablePcode *)glb->pcodeinjectlib->getPayload(injectId);
+-  return pcodeScript->evaluate(input);
+-}
+-
+-void SegmentOp::decode(Decoder &decoder)
+-
+-{
+-  uint4 elemId = decoder.openElement(ELEM_SEGMENTOP);
+-  spc = (AddrSpace *)0;
+-  injectId = -1;
+-  baseinsize = 0;
+-  innerinsize = 0;
+-  supportsfarpointer = false;
+-  name = "segment"; 		// Default name, might be overridden by userop attribute
+-  for(;;) {
+-    uint4 attribId = decoder.getNextAttributeId();
+-    if (attribId == 0) break;
+-    if (attribId == ATTRIB_SPACE)
+-      spc = decoder.readSpace();
+-    else if (attribId == ATTRIB_FARPOINTER)
+-      supportsfarpointer = true;
+-    else if (attribId == ATTRIB_USEROP) {	// Based on existing sleigh op
+-      name = decoder.readString();
+-    }
+-  }
+-  if (spc == (AddrSpace *)0)
+-    throw LowlevelError("<segmentop> expecting space attribute");
+-  UserPcodeOp *otherop = glb->userops.getOp(name);
+-  if (otherop == (UserPcodeOp *)0)
+-    throw LowlevelError("<segmentop> unknown userop " + name);
+-  useropindex = otherop->getIndex();
+-  if (dynamic_cast<UnspecializedPcodeOp *>(otherop) == (UnspecializedPcodeOp *)0)
+-    throw LowlevelError("Redefining userop "+name);
+-
+-  for(;;) {
+-    uint4 subId = decoder.peekElement();
+-    if (subId == 0) break;
+-    if (subId==ELEM_CONSTRESOLVE) {
+-      int4 sz;
+-      decoder.openElement();
+-      if (decoder.peekElement() != 0) {
+-	Address addr = Address::decode(decoder,sz);
+-	constresolve.space = addr.getSpace();
+-	constresolve.offset = addr.getOffset();
+-	constresolve.size = sz;
+-      }
+-      decoder.closeElement(subId);
+-    }
+-    else if (subId == ELEM_PCODE) {
+-      string nm = name + "_pcode";
+-      string source = "cspec";
+-      injectId = glb->pcodeinjectlib->decodeInject(source, nm, InjectPayload::EXECUTABLEPCODE_TYPE, decoder);
+-    }
+-  }
+-  decoder.closeElement(elemId);
+-  if (injectId < 0)
+-    throw LowlevelError("Missing <pcode> child in <segmentop> tag");
+-  InjectPayload *payload = glb->pcodeinjectlib->getPayload(injectId);
+-  if (payload->sizeOutput() != 1)
+-    throw LowlevelError("<pcode> child of <segmentop> tag must declare one <output>");
+-  if (payload->sizeInput() == 1) {
+-    innerinsize = payload->getInput(0).getSize();
+-  }
+-  else if (payload->sizeInput() == 2) {
+-    baseinsize = payload->getInput(0).getSize();
+-    innerinsize = payload->getInput(1).getSize();
+-  }
+-  else
+-    throw LowlevelError("<pcode> child of <segmentop> tag must declare one or two <input> tags");
+ }
+ 
+ /// \param g is the Architecture owning this set of jump assist scripts
+--- a/src/decompiler/userop.hh
++++ b/src/decompiler/userop.hh
+@@ -278,6 +278,9 @@
+   const VarnodeData &getResolve(void) const { return constresolve; }	///< Get the default register for resolving indirect segments
+   virtual int4 getNumVariableTerms(void) const { if (baseinsize!=0) return 2; return 1; }
+   virtual bool unify(Funcdata &data,PcodeOp *op,vector<Varnode *> &bindlist) const;
++  bool usesStaticReferences(void) const; ///< CPU selector bits do not encode this domain
++  Address composeReference(const Address &segment,uintb offset) const; ///< Compose an already established static identity
++  bool resolveReference(Funcdata &data,Varnode *base,Varnode *inner,Address &target) const; ///< Query existing SSA relationships
+   virtual uintb execute(const vector<uintb> &input) const;
+   virtual void decode(Decoder &decoder);
+ };
+--- /dev/null
++++ b/src/unittests/testsegmentreferences.cc
+@@ -0,0 +1,354 @@
++#include "architecture.hh"
++#include "coreaction.hh"
++#include "funcdata.hh"
++#include "libdecomp.hh"
++#include "test.hh"
++#include "xml_arch.hh"
++
++namespace ghidra {
++
++class BoundFarImage : public LoadImageXml {
++  bool bound;
++public:
++  BoundFarImage(const Element *image,bool supplied) : LoadImageXml("bound-far",image),bound(supplied) {}
++  virtual bool getInstructionField(const InstructionField &field) const {
++    return bound && !field.bigEndian && field.bitOffset == 0 && field.bitSize == 16 && field.size == 2 &&
++        (field.source.getOffset() == 0x100000914ULL || field.source.getOffset() == 0x100000916ULL);
++  }
++  virtual bool getInitialReference(const Address &storage,int4 size,InitialReferenceUse use,Address &target) const {
++    if (!bound || storage.getOffset() != 0x100000914ULL || size != 4 || use != complete_pointer_reference)
++      return false;
++    target = Address(storage.getSpace(),0x100000994ULL);
++    return true;
++  }
++  virtual void getReadonly(RangeList &list) const {}
++};
++
++class BoundFarArchitecture : public XmlArchitecture {
++  bool bound;
++  virtual void buildLoader(DocumentStorage &store) {
++    collectSpecFiles(*errorstream);
++    loader = new BoundFarImage(store.getTag("binaryimage"),bound);
++  }
++public:
++  BoundFarArchitecture(bool supplied) : XmlArchitecture("","",&cout),bound(supplied) {}
++};
++
++class ReferencePcodeEmit : public PcodeEmit {
++public:
++  int4 directCalls = 0;
++  int4 indirectCalls = 0;
++  int4 sourceComponents = 0;
++  virtual void dump(const Address &address,OpCode opcode,VarnodeData *out,VarnodeData *inputs,int4 size) {
++    if (opcode == CPUI_CALL) ++directCalls;
++    if (opcode == CPUI_CALLIND) {
++      ASSERT_EQUALS(inputs[0].size,6);
++      ASSERT_EQUALS(inputs[0].space->getType(),IPTR_INTERNAL);
++      ++indirectCalls;
++    }
++    for(int4 i=0;i<size;++i) {
++      if (inputs[i].space != address.getSpace() || inputs[i].size != 2) continue;
++      if (inputs[i].offset == 0x100000914ULL) sourceComponents |= 1;
++      if (inputs[i].offset == 0x100000916ULL) sourceComponents |= 2;
++    }
++  }
++};
++
++// Controlled facts from executed INSTR.EXE ne.reloc.1.10, not a synthetic Windows instruction oracle.
++TEST(segment_reference_bound_and_unbound_far) {
++  for(const string &bytes : {"9a00000400","9affff0000","9a94090100"}) {
++    bool bound = bytes != "9a00000400";
++    startDecompilerLibrary(getenv("SLEIGHHOME"));
++    istringstream input("<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x100000913\">"+bytes+"c3</bytechunk></binaryimage>");
++    DocumentStorage store;
++    Document *document = store.parseDocument(input);
++    store.registerTag(document->getRoot());
++    unique_ptr<Architecture> arch(new BoundFarArchitecture(bound));
++    arch->init(store);
++    AddrSpace *ram = arch->getDefaultCodeSpace();
++    Scope *global = arch->symboltab->getGlobalScope();
++    global->addFunction(Address(ram,0x100000994ULL),"justified_target");
++    global->addFunction(Address(ram,0x400000000ULL),"unjustified_numeric_target");
++    Funcdata *fd = global->addFunction(Address(ram,0x100000913ULL),"far_source")->getFunction();
++    ReferencePcodeEmit emit;
++    ASSERT_EQUALS(arch->translate->oneInstruction(emit,fd->getAddress()),5);
++    ASSERT_EQUALS(emit.directCalls,0);
++    ASSERT_EQUALS(emit.indirectCalls,1);
++    ASSERT_EQUALS(emit.sourceComponents,bound ? 3 : 0);
++    arch->allacts.getCurrent()->reset(*fd);
++    ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++    ASSERT_EQUALS(fd->numCalls(),1);
++    FuncCallSpecs *call = fd->getCallSpecs(0);
++    if (bound) {
++      ASSERT_EQUALS(call->getOp()->code(),CPUI_CALL);
++      ASSERT_EQUALS(call->getEntryAddress(),Address(ram,0x100000994ULL));
++    }
++    else {
++      ASSERT_EQUALS(call->getOp()->code(),CPUI_CALLIND);
++      ASSERT_NOT_EQUALS(call->getEntryAddress(),Address(ram,0x400000000ULL));
++    }
++  }
++}
++
++TEST(segment_reference_bound_far_jump_recovery) {
++  for(const string &bytes : {"eaffff0000","ea94090100"}) {
++    startDecompilerLibrary(getenv("SLEIGHHOME"));
++    istringstream input("<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x100000913\">"+bytes+
++        "</bytechunk></binaryimage>");
++    DocumentStorage store;
++    Document *document = store.parseDocument(input);
++    store.registerTag(document->getRoot());
++    unique_ptr<Architecture> arch(new BoundFarArchitecture(true));
++    arch->init(store);
++    AddrSpace *ram = arch->getDefaultCodeSpace();
++    Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x100000913ULL),"far_jump_source")->getFunction();
++    arch->allacts.getCurrent()->reset(*fd);
++    ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++    ASSERT_EQUALS(fd->numCalls(),1);
++    ASSERT_EQUALS(fd->numJumpTables(),0);
++    PcodeOp *call = fd->getCallSpecs(0)->getOp();
++    ASSERT_EQUALS(call->code(),CPUI_CALLIND);
++    Varnode *target = call->getIn(0);
++    ASSERT_EQUALS(target->getSize(),6);
++    ASSERT(target->isConstant());
++    ASSERT_EQUALS(target->getOffset(),0x100000994ULL);
++    bool hasReturn = false;
++    for(auto iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++      PcodeOp *op = iter->second;
++      if (op->isDead()) continue;
++      ASSERT_NOT_EQUALS(op->code(),CPUI_BRANCHIND);
++      if (op->code() == CPUI_RETURN) {
++        hasReturn = true;
++      }
++    }
++    ASSERT(hasReturn);
++  }
++}
++
++class InitialReferenceImage : public LoadImage {
++  LoadImage *image;
++public:
++  map<pair<uintb,int4>,pair<InitialReferenceUse,uintb> > facts;
++  set<pair<Address,int4> > callPreserved;
++  mutable int4 queries;
++  InitialReferenceImage(LoadImage *original) : LoadImage("initial-references"),image(original),queries(0) {}
++  virtual ~InitialReferenceImage(void) { delete image; }
++  virtual void loadFill(uint1 *ptr,int4 size,const Address &addr) { image->loadFill(ptr,size,addr); }
++  virtual bool getInitialReference(const Address &storage,int4 size,InitialReferenceUse use,Address &target) const {
++    ++queries;
++    auto found = facts.find(make_pair(storage.getOffset(),size));
++    if (found == facts.end() || found->second.first != use) return false;
++    target = Address(storage.getSpace(),found->second.second);
++    return true;
++  }
++  virtual bool isCallPreservedStorage(const Address &storage,int4 size) const {
++    return callPreserved.count(make_pair(storage,size)) != 0;
++  }
++  virtual void getReadonly(RangeList &list) const { image->getReadonly(list); }
++  virtual string getArchType(void) const { return image->getArchType(); }
++  virtual void adjustVma(long adjust) { image->adjustVma(adjust); }
++};
++
++class ReferenceEnvironment {
++public:
++  Architecture *arch;
++  InitialReferenceImage *image;
++  Funcdata *fd;
++  BlockBasic *block;
++  ReferenceEnvironment(const string &bytes = "c3",uintb entry = 0x100001000ULL) {
++    startDecompilerLibrary(getenv("SLEIGHHOME"));
++    ostringstream xml;
++    xml << "<binaryimage arch=\"x86:LE:16:Protected Mode:default\"><bytechunk space=\"ram\" offset=\"0x" << hex << entry;
++    xml << "\" readonly=\"true\">" << bytes << "</bytechunk></binaryimage>";
++    istringstream input(xml.str());
++    DocumentStorage store;
++    Document *document = store.parseDocument(input);
++    store.registerTag(document->getRoot());
++    arch = ArchitectureCapability::getCapability("xml")->buildArchitecture("","",&cout);
++    arch->init(store);
++    image = new InitialReferenceImage(arch->loader);
++    arch->loader = image;
++    fd = arch->symboltab->getGlobalScope()->addFunction(Address(ram(),entry),"reference_test")->getFunction();
++    block = (BlockBasic *)0;
++  }
++  ~ReferenceEnvironment(void) { delete arch; }
++  AddrSpace *ram(void) const { return arch->getDefaultCodeSpace(); }
++  SegmentOp *segment(void) const { return arch->getSegmentOp(ram()); }
++  void synthetic(void) {
++    fd->startProcessing();
++    block = (BlockBasic *)fd->getBasicBlocks().getBlock(0);
++  }
++  Varnode *input(int4 size,const Address &address) { return fd->setInputVarnode(fd->newVarnode(size,address)); }
++  Varnode *cs(void) { return input(2,arch->translate->getRegister("CS").getAddr()); }
++  Varnode *op(OpCode code,int4 size,const vector<Varnode *> &inputs,const Address &output = Address()) {
++    PcodeOp *op = fd->newOp(inputs.size(),fd->getAddress());
++    fd->opSetOpcode(op,code);
++    for(int4 i=0;i<inputs.size();++i)
++      fd->opSetInput(op,inputs[i],i);
++    Varnode *result = output.isInvalid() ? fd->newUniqueOut(size,op) : fd->newVarnodeOut(size,output,op);
++    fd->opInsertBefore(op,block->lastOp());
++    return result;
++  }
++  void heritage(void) { for(int4 i=0;i<4;++i) fd->opHeritage(); }
++  void analyze(void) {
++    PrototypePieces proto;
++    proto.model = arch->getModel("__cdecl16near");
++    proto.outtype = arch->types->getBase(2,TYPE_UINT);
++    proto.firstVarArgSlot = -1;
++    fd->getFuncProto().setPieces(proto);
++    arch->allacts.getCurrent()->reset(*fd);
++    ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  }
++  string print(void) {
++    ostringstream output;
++    arch->print->setOutputStream(&output);
++    arch->print->docFunction(fd);
++    arch->print->setOutputStream((ostream *)0);
++    return output.str();
++  }
++};
++
++// The executed Windows/KVM chain copied actual CS1567, ARPL source3, loaded DS1567 and read code ordinal1:0a15.
++// This bounded excerpt exercises that translated/analyzed relationship, not a numeric selector substitution.
++TEST(segment_reference_translated_cs_arpl_ds) {
++  ReferenceEnvironment env("6633c08cc8b9030063c88ed8a1150ac3");
++  env.arch->symboltab->getGlobalScope()->addSymbol("observed_code_word",env.arch->types->getBase(2,TYPE_UINT),Address(env.ram(),0x100000a15ULL),Address());
++  env.analyze();
++  ASSERT(env.print().find("observed_code_word") != string::npos);
++  ASSERT_EQUALS(env.image->queries,0);
++}
++
++TEST(segment_reference_numeric_closure) {
++  ReferenceEnvironment env;
++  uintb encoding = 0;
++  ASSERT(env.arch->resolveConstant(env.ram(),0x15670a15,4,env.fd->getAddress(),encoding).isInvalid());
++  ASSERT(env.arch->resolveConstant(env.ram(),0x0a15,2,env.fd->getAddress(),encoding).isInvalid());
++  uintb coordinate = 0x100000a15ULL;
++  ASSERT_EQUALS(env.arch->resolveConstant(env.ram(),coordinate,6,env.fd->getAddress(),encoding),Address(env.ram(),coordinate));
++  ASSERT_EQUALS(env.arch->resolveConstant(env.ram(),coordinate,-1,env.fd->getAddress(),encoding),Address(env.ram(),coordinate));
++  bool unavailable = false;
++  try { env.segment()->execute({0x1567,0x0a15}); }
++  catch(LowlevelError &error) { unavailable = error.explain.find("unavailable") != string::npos; }
++  ASSERT(unavailable);
++  env.synthetic();
++  Varnode *cs = env.cs();
++  Varnode *near = env.fd->newConstant(2,0x0a15);
++  Address target;
++  ASSERT(!env.segment()->resolveReference(*env.fd,cs,near,target));
++  env.heritage();
++  ASSERT(env.segment()->resolveReference(*env.fd,cs,near,target));
++  ASSERT_EQUALS(target,Address(env.ram(),coordinate));
++  ASSERT(!env.segment()->resolveReference(*env.fd,env.fd->newConstant(2,1),near,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,env.fd->newVarnode(2,cs->getAddr()),near,target));
++}
++
++TEST(segment_reference_fields_masks_and_merges) {
++  ReferenceEnvironment env;
++  env.synthetic();
++  Varnode *cs = env.cs();
++  Varnode *masked = env.op(CPUI_INT_AND,2,{cs,env.fd->newConstant(2,0xfffc)});
++  Varnode *rpl = env.fd->newConstant(2,3);
++  Varnode *adjusted = env.op(CPUI_INT_OR,2,{masked,rpl});
++  Varnode *wide = env.op(CPUI_PIECE,4,{env.fd->newConstant(2,0xabcd),adjusted});
++  Varnode *extracted = env.op(CPUI_SUBPIECE,2,{wide,env.fd->newConstant(4,0)});
++  Varnode *high = env.op(CPUI_SUBPIECE,1,{extracted,env.fd->newConstant(4,1)});
++  Varnode *low = env.op(CPUI_SUBPIECE,1,{extracted,env.fd->newConstant(4,0)});
++  Varnode *joined = env.op(CPUI_PIECE,2,{high,low});
++  Varnode *same = env.op(CPUI_MULTIEQUAL,2,{joined,cs});
++  Varnode *changed = env.op(CPUI_INT_OR,2,{cs,env.fd->newConstant(2,4)});
++  Varnode *arithmetic = env.op(CPUI_INT_ADD,2,{cs,env.fd->newConstant(2,1)});
++  Varnode *unknown = env.input(2,Address(env.ram(),0x100002000ULL));
++  Varnode *conflict = env.op(CPUI_MULTIEQUAL,2,{cs,unknown});
++  Varnode *agreeing = env.input(2,Address(env.ram(),0x100002100ULL));
++  Varnode *sameIdentity = env.op(CPUI_MULTIEQUAL,2,{cs,agreeing});
++  Varnode *cycle = env.op(CPUI_MULTIEQUAL,2,{cs,cs});
++  env.fd->opSetInput(cycle->getDef(),cycle,1);
++  Varnode *indirect = env.op(CPUI_INDIRECT,2,{cs,env.fd->newVarnodeIop(masked->getDef())});
++  env.image->facts[{0x100002000ULL,2}] = {selector_reference,0x200000000ULL};
++  env.image->facts[{0x100002100ULL,2}] = {selector_reference,0x100000000ULL};
++  env.heritage();
++  Address target;
++  Varnode *offset = env.fd->newConstant(2,0xa15);
++  ASSERT(env.segment()->resolveReference(*env.fd,same,offset,target));
++  ASSERT_EQUALS(target,Address(env.ram(),0x100000a15ULL));
++  ASSERT(env.segment()->resolveReference(*env.fd,sameIdentity,offset,target));
++  ASSERT_EQUALS(target,Address(env.ram(),0x100000a15ULL));
++  ASSERT(!env.segment()->resolveReference(*env.fd,changed,offset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,arithmetic,offset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,conflict,offset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,cycle,offset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,indirect,offset,target));
++}
++
++TEST(segment_reference_complete_pointer_provenance) {
++  ReferenceEnvironment env;
++  env.synthetic();
++  env.image->facts[{0x100002000ULL,4}] = {complete_pointer_reference,0x500001234ULL};
++  env.image->facts[{0x100003000ULL,4}] = {complete_pointer_reference,0x500001234ULL};
++  Varnode *whole = env.input(4,Address(env.ram(),0x100002000ULL));
++  Varnode *other = env.input(4,Address(env.ram(),0x100003000ULL));
++  Varnode *selector = env.op(CPUI_SUBPIECE,2,{whole,env.fd->newConstant(4,2)});
++  Varnode *near = env.op(CPUI_SUBPIECE,2,{whole,env.fd->newConstant(4,0)});
++  Varnode *extended = env.op(CPUI_INT_ZEXT,4,{near});
++  Varnode *maskedSelector = env.op(CPUI_INT_AND,2,{selector,env.fd->newConstant(2,0xfffc)});
++  Varnode *maskedOffset = env.op(CPUI_INT_AND,2,{near,env.fd->newConstant(2,0xfffc)});
++  Varnode *changedOffset = env.op(CPUI_INT_OR,2,{near,env.fd->newConstant(2,1)});
++  Varnode *mergedOffset = env.op(CPUI_MULTIEQUAL,2,{near,changedOffset});
++  Varnode *mergedSelector = env.op(CPUI_MULTIEQUAL,2,{selector,maskedSelector});
++  Varnode *offsetHigh = env.op(CPUI_SUBPIECE,1,{changedOffset,env.fd->newConstant(4,1)});
++  Varnode *offsetLow = env.op(CPUI_SUBPIECE,1,{changedOffset,env.fd->newConstant(4,0)});
++  Varnode *reassembledOffset = env.op(CPUI_PIECE,2,{offsetHigh,offsetLow});
++  Varnode *selectorHigh = env.op(CPUI_SUBPIECE,1,{whole,env.fd->newConstant(4,3)});
++  Varnode *adjacentByte = env.input(1,Address(env.ram(),0x100002004ULL));
++  Varnode *shiftedWord = env.op(CPUI_PIECE,2,{adjacentByte,selectorHigh});
++  Varnode *changedWord = env.op(CPUI_INT_OR,2,{shiftedWord,env.fd->newConstant(2,1)});
++  Varnode *changedHigh = env.op(CPUI_SUBPIECE,1,{changedWord,env.fd->newConstant(4,0)});
++  Varnode *selectorLow = env.op(CPUI_SUBPIECE,1,{whole,env.fd->newConstant(4,2)});
++  Varnode *changedSelector = env.op(CPUI_PIECE,2,{changedHigh,selectorLow});
++  Varnode *unrelated = env.op(CPUI_SUBPIECE,2,{other,env.fd->newConstant(4,0)});
++  Varnode *written = env.op(CPUI_COPY,2,{env.fd->newConstant(2,5)},Address(env.ram(),0x100002002ULL));
++  Varnode *load = env.op(CPUI_LOAD,2,{env.fd->newVarnodeSpace(env.ram()),env.fd->newConstant(6,0x100002002ULL)});
++  env.heritage();
++  Address target;
++  ASSERT(env.segment()->resolveReference(*env.fd,selector,extended,target));
++  ASSERT_EQUALS(target,Address(env.ram(),0x500001234ULL));
++  ASSERT(env.segment()->resolveReference(*env.fd,mergedSelector,extended,target));
++  ASSERT(env.segment()->resolveReference(*env.fd,maskedSelector,extended,target));
++  ASSERT_EQUALS(target,Address(env.ram(),0x500001234ULL));
++  ASSERT(!env.segment()->resolveReference(*env.fd,selector,maskedOffset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,selector,changedOffset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,selector,mergedOffset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,selector,reassembledOffset,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,changedSelector,near,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,selector,unrelated,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,selector,env.fd->newConstant(2,0x1234),target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,written,near,target));
++  ASSERT(!env.segment()->resolveReference(*env.fd,load,near,target));
++}
++
++TEST(segment_reference_initial_memory_and_prior_writes) {
++  for(const string &prefix : {"","c70600200000","8907"}) {
++    ReferenceEnvironment env("8cc88ed8"+prefix+"a100208ed8a10030c3");
++    env.image->facts[{0x100002000ULL,2}] = {selector_reference,0x200000000ULL};
++    env.image->callPreserved.insert(make_pair(Address(env.ram(),0x100002000ULL),2));
++    env.arch->symboltab->getGlobalScope()->addSymbol("qualified_initial_target",env.arch->types->getBase(2,TYPE_UINT),Address(env.ram(),0x200003000ULL),Address());
++    env.analyze();
++    ASSERT_EQUALS(env.print().find("qualified_initial_target") != string::npos,prefix.empty());
++  }
++}
++
++// Normal FAR-return observation: callerCS1557/file3 -> calleeCS154f/file4 -> callerCS1557/file3.
++TEST(segment_reference_far_caller_and_callee_entry) {
++  ReferenceEnvironment caller("9a000004008cc88ed8a1150ac3",0x300000023ULL);
++  caller.arch->symboltab->getGlobalScope()->addFunction(Address(caller.ram(),0x400000000ULL),"captured_callee");
++  caller.arch->symboltab->getGlobalScope()->addSymbol("caller_code_word",caller.arch->types->getBase(2,TYPE_UINT),Address(caller.ram(),0x300000a15ULL),Address());
++  caller.analyze();
++  ASSERT_EQUALS(caller.fd->numCalls(),1);
++  ASSERT(caller.print().find("caller_code_word") != string::npos);
++  ReferenceEnvironment callee("8cc88ed8a1150acb",0x400000000ULL);
++  callee.arch->symboltab->getGlobalScope()->addSymbol("callee_code_word",callee.arch->types->getBase(2,TYPE_UINT),Address(callee.ram(),0x400000a15ULL),Address());
++  callee.analyze();
++  ASSERT(callee.print().find("callee_code_word") != string::npos);
++}
++
++} // End namespace ghidra
