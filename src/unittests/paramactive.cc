@@ -75,7 +75,7 @@ TEST(which_trial_returns_first_overlapping_trial)
   active.registerTrial(Address(spc,0x2000),4);
   active.registerTrial(Address(spc,0x2002),4);	// also overlaps
 
-  ASSERT_EQUALS(active.whichTrial(Address(spc,0x2001),1),0);
+  ASSERT_EQUALS(active.whichTrial(Address(spc,0x2002),1),0);
 }
 
 /// A multi-byte query that only reaches a trial with its last byte must
@@ -88,6 +88,16 @@ TEST(which_trial_multibyte_query_checks_end_address)
 
   ASSERT_EQUALS(active.whichTrial(Address(spc,0x1ffd),4),0);
   ASSERT_EQUALS(active.whichTrial(Address(spc,0x1ffc),4),-1);
+}
+
+/// A query that strictly contains a trial must find it even though neither query endpoint overlaps the trial.
+TEST(which_trial_query_contains_trial)
+{
+  AddrSpace *spc = getTestSpace();
+  ParamActive active(false);
+  active.registerTrial(Address(spc,8),2);
+
+  ASSERT_EQUALS(active.whichTrial(Address(spc,4),8),0);
 }
 
 /// A query that matches no trial still returns -1 after the loop.

@@ -54,11 +54,7 @@ Native owner tests do not qualify every bridge consumer. Bridge Make, XPS Make/M
 ## Tests
 
 `src/unittests/paramactive.cc`
-: `ParamActive::whichTrial` regression tests.  The one-byte cases are
-  the regression from rizinorg/rz-ghidra#385: the original code returned
-  `-1` as soon as the first trial did not overlap a one-byte access,
-  which made callers register duplicate trials or index the trial vector
-  with `-1`.
+: `ParamActive::whichTrial` regression tests cover one-byte scanning, zero-length point lookup, first-vector-match ordering when both trials overlap, last-byte overlap, strict containment of a trial by a query and no match. The one-byte cases are the regression from rizinorg/rz-ghidra#385: the original code returned `-1` as soon as the first trial did not overlap a one-byte access, which made callers register duplicate trials or index the trial vector with `-1`.
 
 `src/unittests/pcodeinject.cc`
 : Dynamic p-code injection tests.  A `<pcode inject="..." dynamic="true"/>`
