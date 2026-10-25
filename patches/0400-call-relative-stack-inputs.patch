@@ -1,6 +1,25 @@
+--- a/src/decompiler/coreaction.cc
++++ b/src/decompiler/coreaction.cc
+@@ -1897,6 +1897,8 @@
+ int4 ActionActiveParam::apply(Funcdata &data)
+ 
+ {
++  for(int4 i=0;i<data.numCalls();++i)
++    data.getCallSpecs(i)->recoverCallRelativeInputs(data);
+   int4 i;
+   FuncCallSpecs *fc;
+   AliasChecker aliascheck;
 --- a/src/decompiler/fspec.cc
 +++ b/src/decompiler/fspec.cc
-@@ -4875,6 +4875,160 @@
+@@ -15,6 +15,7 @@
+  */
+ #include "fspec.hh"
+ #include "funcdata.hh"
++#include "ruleaction.hh"
+ 
+ namespace ghidra {
+ 
+@@ -4875,6 +4876,211 @@
    data.opInsertInput(op,loadval,slot);
    setStackPlaceholderSlot(slot);
    loadval->setSpacebasePlaceholder();
@@ -94,6 +113,49 @@
 +  }
 +}
 +
++/// A competing read disqualifies opaque inference, without asserting contents survive the call.
++static bool callInputCompetingRead(PcodeOp *store,AddrSpace *memory,PcodeOp *call)
++
++{
++  Varnode *pointer = store->getIn(1);
++  uintb offset;
++  Varnode *base = callInputPointerBase(pointer,offset);
++  Address cell(memory,memory->wrapOffset(AddrSpace::addressToByte(offset,memory->getWordSize())));
++  int4 size = store->getIn(2)->getSize();
++  BlockBasic *block = call->getParent();
++  list<PcodeOp *>::iterator iter = call->getBasicIter();
++  while(++iter != block->endOp()) {
++    PcodeOp *cur = *iter;
++    if (cur->isCall() || cur->isFlowBreak()) return false;
++    if (cur->code() == CPUI_LOAD || cur->code() == CPUI_STORE) {
++      if (cur->getIn(0)->getSpaceFromConst() != memory) continue;
++      Varnode *ptr = cur->getIn(1);
++      if (ptr->getSize() != pointer->getSize()) return false;
++      uintb readOffset;
++      if (callInputPointerBase(ptr,readOffset) != base) return false;
++      Address addr(memory,memory->wrapOffset(AddrSpace::addressToByte(readOffset,memory->getWordSize())));
++      bool isLoad = cur->code() == CPUI_LOAD;
++      Varnode *value = isLoad ? cur->getOut() : cur->getIn(2);
++      if (value->isVolatile()) return false;
++      int4 readSize = value->getSize();
++      if (addr.overlap(0,cell,size) < 0 && cell.overlap(0,addr,readSize) < 0) continue;
++      if (!isLoad || addr != cell || readSize != size) return false;
++      if (!value->hasNoDescend()) return true;
++    }
++    else {
++      Varnode *out = cur->getOut();
++      if (out != (Varnode *)0 && (out->getSpace() == memory || out->getSpace()->getType() == IPTR_SPACEBASE))
++        return false;
++      for(int4 i=0;i<cur->numInput();++i) {
++        AddrSpace *space = cur->getIn(i)->getSpace();
++        if (space == memory || space->getType() == IPTR_SPACEBASE)
++          return false;
++      }
++    }
++  }
++  return false;
++}
++
 +/// Recover stack arguments relative to the actual call SP without assigning an entry-relative offset.
 +void FuncCallSpecs::recoverCallRelativeInputs(Funcdata &data)
 +
@@ -108,6 +170,8 @@
 +      if (!vn->isWritten() || vn->isVolatile()) continue;
 +      PcodeOp *load = vn->getDef();
 +      if (load->code() != CPUI_LOAD) continue;
++      uintb canonicalOffset;
++      if (RuleLoadVarnode::checkSpacebase(data.getArch(),load,canonicalOffset) == stack) continue;
 +      AddrSpace *memory = load->getIn(0)->getSpaceFromConst();
 +      vector<PcodeOp *> stores;
 +      callInputReachingStores(load,memory,load->getIn(1),stores);
@@ -134,6 +198,8 @@
 +  Varnode *pointer = getSpacebaseRelative();
 +  if (pointer == (Varnode *)0) return;
 +  PcodeOp *placeholder = op->getIn(stackPlaceholderSlot)->getDef();
++  uintb canonicalOffset;
++  if (RuleLoadVarnode::checkSpacebase(data.getArch(),placeholder,canonicalOffset) == stack) return;
 +  AddrSpace *memory = placeholder->getIn(0)->getSpaceFromConst();
 +  if (memory != stack->getContain()) return;
 +  uintb callOffset;
@@ -155,13 +221,17 @@
 +    else if (value->isFree())
 +      continue;
 +    activeinput.registerTrial(addr,size);
-+    activeinput.getTrial(activeinput.getNumTrials()-1).markActive();
++    ParamTrial &trial(activeinput.getTrial(activeinput.getNumTrials()-1));
++    if (callInputCompetingRead(store,memory,op))
++      trial.markNoUse();
++    else
++      trial.markActive();
 +    data.opInsertInput(op,value,op->numInput());
 +  }
  }
  
  /// \brief Calculate the stack offset of \b this call site
-@@ -5733,10 +5887,14 @@
+@@ -5733,10 +5939,14 @@
      off = addr.getOffset();
      if (spc->getType() == IPTR_SPACEBASE) {
        isspacebase = true;
@@ -178,7 +248,7 @@
      }
      else {
        vn = op->getIn(paramtrial.getSlot()); // Where parameter is currently
-@@ -5756,7 +5914,7 @@
+@@ -5756,7 +5966,7 @@
      }
      newparam.push_back(vn);
      // Mark the stack range used to pass this parameter as unmapped
@@ -197,16 +267,85 @@
    void resolveSpacebaseRelative(Funcdata &data,Varnode *phvn);
    void abortSpacebaseRelative(Funcdata &data);
    void finalInputCheck(void);
---- a/src/decompiler/heritage.cc
-+++ b/src/decompiler/heritage.cc
-@@ -2127,7 +2127,9 @@
- {
-   int4 numCalls = fd->numCalls();
-   for(int4 i=0;i<numCalls;++i) {
--    fd->getCallSpecs(i)->abortSpacebaseRelative(*fd);
-+    FuncCallSpecs *call = fd->getCallSpecs(i);
-+    call->recoverCallRelativeInputs(*fd);
-+    call->abortSpacebaseRelative(*fd);
-   }
-   info->hasCallPlaceholders = false;	// Mark that clear has taken place
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -2577,4 +2577,79 @@
+   ASSERT_EQUALS(PcodeOp::getOpFromConst(second->getIn(1)->getAddr()),fc->getOp());
  }
+ 
++TEST(segmented_opaque_saved_stack_not_arguments) {
++  string bytes = "8d4c240483e4f0ff71fc5589e55183ec04c7042480100000e8230000008d65fc595d8d61fcc3";
++  bytes.resize(0x40*2,'0');
++  bytes += "8b442404c3";
++  bytes.resize(0x80*2,'0');
++  bytes += "4631320a00";
++  SegmentedEnvironment env(false,"x86:LE:32:default:gcc",bytes);
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  Funcdata *callee = env.arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1040),"consume_format")->getFunction();
++  callee->getFuncProto().setModel(env.arch->defaultfp);
++  ParameterPieces output;
++  output.addr = env.arch->translate->getRegister("EAX").getAddr();
++  output.type = env.arch->types->getBase(4,TYPE_UINT);
++  output.flags = ParameterPieces::typelock;
++  env.fd->getFuncProto().setOutput(output);
++  env.fd->getFuncProto().setOutputLock(true);
++  ASSERT(!callee->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),0);
++  ASSERT(!env.fd->getFuncProto().isInputLocked());
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*env.fd);
++  ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
++  bool excluded = false;
++  int4 result = root->perform(*env.fd);
++  while(result == -1) {
++    ASSERT_EQUALS(env.fd->numCalls(),1);
++    FuncCallSpecs *call = env.fd->getCallSpecs(0);
++    ParamActive *active = call->getActiveInput();
++    int4 index = active->whichTrial(Address(env.arch->getStackSpace(),8),4);
++    if (index >= 0 && active->getTrial(index).isDefinitelyNotUsed()) {
++      const ParamTrial &trial(active->getTrial(index));
++      ASSERT(trial.isChecked());
++      ASSERT(!trial.isActive());
++      ASSERT(!trial.isUsed());
++      ASSERT(call->isInputActive());
++      ASSERT(!active->isFullyChecked());
++      ASSERT_EQUALS(call->getSpacebaseOffset(),FuncCallSpecs::offset_unknown);
++      excluded = true;
++      break;
++    }
++    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
++    result = root->perform(*env.fd);
++  }
++  ASSERT(excluded);
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *call = env.fd->getCallSpecs(0);
++  ASSERT_EQUALS(call->getOp()->getAddr(),Address(ram,0x1018));
++  ASSERT_EQUALS(call->getModelName(),"__cdecl");
++  ASSERT(!call->isInputLocked());
++  ASSERT_EQUALS(call->getSpacebaseOffset(),FuncCallSpecs::offset_unknown);
++  ASSERT_EQUALS(call->getOp()->numInput(),2);
++  Varnode *format = call->getOp()->getIn(1);
++  while(format->isWritten() && (format->getDef()->code() == CPUI_COPY || format->getDef()->code() == CPUI_CAST)) {
++    Varnode *input = format->getDef()->getIn(0);
++    ASSERT_EQUALS(input->getSize(),format->getSize());
++    format = input;
++  }
++  ASSERT(format->isConstant());
++  ASSERT_EQUALS(format->getOffset(),0x1080);
++  ASSERT_EQUALS(format->getSize(),4);
++  Varnode *entry = env.fd->findVarnodeInput(4,env.arch->translate->getRegister("ESP").getAddr());
++  ASSERT(entry != (Varnode *)0);
++  bool alignment = false;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->code() != CPUI_INT_AND || !op->getIn(1)->isConstant()) continue;
++    if (op->getIn(1)->getOffset() == 0xfffffff0 && tasm31DependsOn(op->getIn(0),entry))
++      alignment = true;
++  }
++  ASSERT(alignment);
++  ASSERT(!callee->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),0);
++}
++
+ } // End namespace ghidra
