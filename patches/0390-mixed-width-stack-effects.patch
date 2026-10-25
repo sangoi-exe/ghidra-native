@@ -117,12 +117,34 @@
      Varnode *vn = solver.getVariable(i);
      int4 soln = solver.getSolution(i);
      if (soln == 65535) {
+@@ -304,11 +308,12 @@
+ 	PcodeOp *iop = PcodeOp::getOpFromConst(iopvn->getAddr());
+ 	FuncCallSpecs *fc = data.getCallSpecs(iop);
+ 	if (fc != (FuncCallSpecs *)0) {
+-	  int4 soln2 = 0;
+ 	  int4 comp = solver.getCompanion(i);
+-	  if (comp >= 0)
+-	    soln2 = solver.getSolution(comp);
+-	  fc->setEffectiveExtraPop(soln-soln2);
++	  if (comp >= 0) {
++	    int4 soln2 = solver.getSolution(comp);
++	    if (soln2 != 65535)
++	      fc->setEffectiveExtraPop(soln-soln2);
++	  }
+ 	}
+       }
+     }
 --- a/src/decompiler/ruleaction.cc
 +++ b/src/decompiler/ruleaction.cc
-@@ -1005,6 +1005,32 @@
-     Varnode *small1 = RulePullsubMulti::findSubpiece(basevn,newSize,op->getIn(1)->getOffset());
+@@ -1002,12 +1002,40 @@
+   }
+   else {
+     Varnode *basevn = indir->getIn(0);
+-    Varnode *small1 = RulePullsubMulti::findSubpiece(basevn,newSize,op->getIn(1)->getOffset());
++    Varnode *small1 = RulePullsubMulti::findSubpiece(basevn,newSize,minByte);
      if (small1 == (Varnode *)0)
-       small1 = RulePullsubMulti::buildSubpiece(basevn,newSize,op->getIn(1)->getOffset(),data);
+-      small1 = RulePullsubMulti::buildSubpiece(basevn,newSize,op->getIn(1)->getOffset(),data);
++      small1 = RulePullsubMulti::buildSubpiece(basevn,newSize,minByte,data);
 +    bool unaffected = false;
 +    if ((targ_op->code() == CPUI_CALL || targ_op->code() == CPUI_CALLIND) && !indir->noIndirectCollapse()) {
 +      FuncCallSpecs *fc = data.getCallSpecs(targ_op);
@@ -152,9 +174,14 @@
      // Create new indirect near original indirect
      new_ind = data.newOp(2,indir->getAddr());
      data.opSetOpcode(new_ind,CPUI_INDIRECT);
++    if (indir->noIndirectCollapse())
++      new_ind->setNoIndirectCollapse();
+     small2 = data.newVarnodeOut(newSize,smalladdr2,new_ind);
+     data.opSetInput(new_ind,small1,0);
+     data.opSetInput(new_ind,data.newVarnodeIop(targ_op),1);
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -2210,4 +2210,115 @@
+@@ -2210,4 +2210,230 @@
    ASSERT(!env.mayAlias(3,1));
  }
  
@@ -267,6 +294,121 @@
 +
 +TEST(segmented_projected_late_known_cleanup_marker) {
 +  checkProjectedCleanupMarker(true);
++}
++
++TEST(segmented_stack_solved_output_unknown_companion) {
++  for(bool stackCompanion : {true,false}) {
++    SegmentedEnvironment env(true,"x86:LE:16:Protected Mode:default","e81000e81000cb");
++    ASSERT_EQUALS(env.fd->numCalls(),2);
++    FuncCallSpecs *first = env.fd->getCallSpecs(0);
++    FuncCallSpecs *second = env.fd->getCallSpecs(1);
++    first->setInternal(env.arch->getModel("__stdcall16near"),env.arch->types->getTypeVoid());
++    second->setInternal(env.arch->getModel("__stdcall16near"),env.arch->types->getTypeVoid());
++    const VarnodeData &sp(env.arch->getStackSpace()->getSpacebase(0));
++    Address address(sp.space,sp.offset);
++    Varnode *root = env.fd->setInputVarnode(env.fd->newVarnode(sp.size,address));
++    PcodeOp *unknown = env.op(CPUI_INDIRECT,{root,env.fd->newVarnodeIop(first->getOp())});
++    if (stackCompanion) env.fd->newVarnodeOut(sp.size,address,unknown);
++    else env.fd->newUniqueOut(sp.size,unknown);
++    PcodeOp *solved = env.op(CPUI_INDIRECT,{unknown->getOut(),env.fd->newVarnodeIop(second->getOp())});
++    env.fd->newVarnodeOut(sp.size,address,solved);
++    PcodeOp *merge = env.op(CPUI_MULTIEQUAL,{root,solved->getOut()});
++    env.fd->newVarnodeOut(sp.size,address,merge);
++    ActionStackPtrFlow flow("base",env.arch->getStackSpace());
++    flow.reset(*env.fd);
++    flow.apply(*env.fd);
++    ASSERT_EQUALS(unknown->code(),CPUI_INDIRECT);
++    ASSERT_EQUALS(first->getExtraPop(),ProtoModel::extrapop_unknown);
++    ASSERT_EQUALS(second->getExtraPop(),ProtoModel::extrapop_unknown);
++    ASSERT_EQUALS(first->getEffectiveExtraPop(),ProtoModel::extrapop_unknown);
++    ASSERT_EQUALS(second->getEffectiveExtraPop(),ProtoModel::extrapop_unknown);
++    for(PcodeOp *op : {solved,merge}) {
++      ASSERT_EQUALS(op->code(),CPUI_INT_ADD);
++      ASSERT_EQUALS(op->getIn(0),root);
++      ASSERT(op->getIn(1)->isConstant());
++      ASSERT_EQUALS(op->getIn(1)->getOffset(),0);
++    }
++  }
++}
++
++TEST(segmented_projected_aggregate_source_slice) {
++  for(bool reuse : {false,true}) {
++    SegmentedEnvironment env(true,"x86:LE:16:Protected Mode:default","e81000cb");
++    ASSERT_EQUALS(env.fd->numCalls(),1);
++    FuncCallSpecs *fc = env.fd->getCallSpecs(0);
++    fc->setInternal(env.arch->getModel("__cdecl16far"),env.arch->types->getTypeVoid());
++    Datatype *word = env.arch->types->getBase(2,TYPE_UINT);
++    Datatype *byte = env.arch->types->getBase(1,TYPE_UINT);
++    Varnode *base = env.op(CPUI_COPY,{env.constant(4,0x44332211)},env.arch->types->getBase(4,TYPE_UINT))->getOut();
++    base->setConsume(0xffff);
++    Varnode *existing = (Varnode *)0;
++    if (reuse) existing = env.op(CPUI_SUBPIECE,{base,env.constant(4,0)},word)->getOut();
++    PcodeOp *guard = env.op(CPUI_INDIRECT,{base,env.fd->newVarnodeIop(fc->getOp())});
++    env.fd->newVarnodeOut(4,env.arch->translate->getRegister("ESI").getAddr(),guard);
++    PcodeOp *high = env.op(CPUI_SUBPIECE,{guard->getOut(),env.constant(4,1)},byte);
++    PcodeOp *low = env.op(CPUI_SUBPIECE,{guard->getOut(),env.constant(4,0)},word);
++    RulePullsubIndirect rule("base");
++    ASSERT_EQUALS(rule.applyOp(high,*env.fd),1);
++    ASSERT_EQUALS(low->code(),CPUI_COPY);
++    Varnode *selected = low->getIn(0);
++    if (reuse) ASSERT_EQUALS(selected,existing);
++    ASSERT_EQUALS(selected->getSize(),2);
++    PcodeOp *slice = selected->getDef();
++    ASSERT_EQUALS(slice->code(),CPUI_SUBPIECE);
++    ASSERT_EQUALS(slice->getIn(0),base);
++    ASSERT_EQUALS(slice->getIn(1)->getOffset(),0);
++    ASSERT_EQUALS(high->getIn(0),selected);
++    ASSERT_EQUALS(high->getIn(1)->getOffset(),1);
++    uintb value = slice->getOpcode()->getBehavior()->evaluateBinary(2,4,0x44332211,slice->getIn(1)->getOffset());
++    ASSERT_EQUALS(value,0x2211);
++    ASSERT_EQUALS(high->getOpcode()->getBehavior()->evaluateBinary(1,2,value,high->getIn(1)->getOffset()),0x22);
++  }
++}
++
++TEST(segmented_projected_reused_slice_keeps_protection) {
++  SegmentedEnvironment env(true,"x86:LE:16:Protected Mode:default","e81000cb");
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *fc = env.fd->getCallSpecs(0);
++  fc->setInternal(env.arch->getModel("__cdecl16far"),env.arch->types->getTypeVoid());
++  env.fd->opHeritage();
++  Datatype *word = env.arch->types->getBase(2,TYPE_UINT);
++  Datatype *byte = env.arch->types->getBase(1,TYPE_UINT);
++  Address address = env.arch->translate->getRegister("ESI").getAddr();
++  Varnode *input = env.fd->setInputVarnode(env.fd->newVarnode(4,address));
++  Varnode *base = env.op(CPUI_COPY,{input},env.arch->types->getBase(4,TYPE_UINT))->getOut();
++  base->setConsume(0xffff);
++  Varnode *existing = env.op(CPUI_SUBPIECE,{base,env.constant(4,0)},word)->getOut();
++  existing->setConsume(0xff);
++  ASSERT_EQUALS(RulePullsubMulti::findSubpiece(base,2,0),existing);
++  PcodeOp *guard = env.op(CPUI_INDIRECT,{base,env.fd->newVarnodeIop(fc->getOp())});
++  env.fd->newVarnodeOut(4,address,guard);
++  guard->setNoIndirectCollapse();
++  PcodeOp *copy = env.op(CPUI_SUBPIECE,{guard->getOut(),env.constant(4,0)},word);
++  PcodeOp *narrow = env.op(CPUI_SUBPIECE,{copy->getOut(),env.constant(4,0)},byte);
++  env.op(CPUI_COPY,{narrow->getOut()},byte);
++  RulePullsubIndirect rule("base");
++  ASSERT_EQUALS(rule.applyOp(copy,*env.fd),1);
++  ASSERT_EQUALS(copy->code(),CPUI_COPY);
++  PcodeOp *first = copy->getIn(0)->getDef();
++  ASSERT_EQUALS(first->code(),CPUI_INDIRECT);
++  ASSERT_EQUALS(first->getIn(0),existing);
++  ASSERT(first->noIndirectCollapse());
++  RulePropagateCopy propagate("base");
++  ASSERT_EQUALS(propagate.applyOp(narrow,*env.fd),1);
++  ASSERT_EQUALS(narrow->getIn(0),first->getOut());
++  ASSERT(copy->getOut()->hasNoDescend());
++  ASSERT(!copy->getOut()->isAutoLive());
++  ASSERT(!copy->getOut()->getSpace()->doesDeadcode() || env.fd->deadRemovalAllowed(copy->getOut()->getSpace()));
++  RuleEarlyRemoval remove("base");
++  ASSERT_EQUALS(remove.applyOp(copy,*env.fd),1);
++  ASSERT_EQUALS(existing->getConsume(),0xff);
++  ASSERT_EQUALS(rule.applyOp(narrow,*env.fd),1);
++  ASSERT_EQUALS(narrow->code(),CPUI_COPY);
++  PcodeOp *second = narrow->getIn(0)->getDef();
++  ASSERT_EQUALS(second->code(),CPUI_INDIRECT);
++  ASSERT_EQUALS(second->getOut()->getSize(),1);
++  ASSERT(second->noIndirectCollapse());
++  ASSERT_EQUALS(PcodeOp::getOpFromConst(second->getIn(1)->getAddr()),fc->getOp());
 +}
 +
  } // End namespace ghidra
