@@ -92,17 +92,44 @@
      Varnode *vn = vnlist[i];
      Varnode *othervn,*constvn;
      PcodeOp *op = vn->getDef();
-@@ -221,8 +224,7 @@
+@@ -221,35 +224,7 @@
  	}
        }
  
 -      eqn.rhs = 4;		// Otherwise make a guess
 -      guess.push_back(eqn);
+-    }
+-    else if (op->code() == CPUI_MULTIEQUAL) {
+-      for(int4 j=0;j<op->numInput();++j) {
+-	othervn = op->getIn(j);
+-	if (othervn->getAddr() != spacebase) { missedvariables += 1; continue; }
+-	iter = lower_bound(vnlist.begin(),vnlist.end(),othervn,Varnode::comparePointers);
+-	eqn.var1 = i;
+-	eqn.var2 = iter-vnlist.begin();
+-	eqn.rhs = 0;
+-	eqs.push_back(eqn);
+-      }
+-    }
+-    else if (op->code() == CPUI_INT_AND) {
+-      // This can occur if a function aligns its stack pointer
+-      othervn = op->getIn(0);
+-      constvn = op->getIn(1);
+-      if (othervn->isConstant()) {
+-	constvn = othervn;
+-	othervn = op->getIn(1);
+-      }
+-      if (!constvn->isConstant()) { missedvariables+=1; continue; }
+-      if (othervn->getAddr() != spacebase) { missedvariables+=1; continue; }
+-      iter = lower_bound(vnlist.begin(),vnlist.end(),othervn,Varnode::comparePointers);
+-      eqn.var1 = i;
+-      eqn.var2 = iter-vnlist.begin();
+-      eqn.rhs = 0;		// Treat this as a copy
+-      eqs.push_back(eqn);
 +      missedvariables += 1;
      }
-     else if (op->code() == CPUI_MULTIEQUAL) {
-       for(int4 j=0;j<op->numInput();++j) {
-@@ -283,10 +285,12 @@
+     else
+       missedvariables += 1;
+@@ -283,10 +258,12 @@
    if (solver.getNumVariables() == 0) return;
    solver.solve();		// Solve the equations
  
@@ -117,7 +144,7 @@
      Varnode *vn = solver.getVariable(i);
      int4 soln = solver.getSolution(i);
      if (soln == 65535) {
-@@ -304,11 +308,12 @@
+@@ -304,11 +281,12 @@
  	PcodeOp *iop = PcodeOp::getOpFromConst(iopvn->getAddr());
  	FuncCallSpecs *fc = data.getCallSpecs(iop);
  	if (fc != (FuncCallSpecs *)0) {
@@ -134,6 +161,17 @@
  	}
        }
      }
+--- a/src/decompiler/funcdata_varnode.cc
++++ b/src/decompiler/funcdata_varnode.cc
+@@ -944,8 +944,6 @@
+ 	}
+ 	else {
+ 	  vn->nzm = calc_mask(vn->getSize());
+-	  if (vn->isSpacebase())
+-	    vn->nzm &= ~((uintb)0xff); // Treat spacebase input as aligned
+ 	}
+       }
+       else if (!vn->getDef()->isMark()) { // If haven't traversed before
 --- a/src/decompiler/ruleaction.cc
 +++ b/src/decompiler/ruleaction.cc
 @@ -1002,12 +1002,40 @@
@@ -181,7 +219,7 @@
      data.opSetInput(new_ind,data.newVarnodeIop(targ_op),1);
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -2210,4 +2210,230 @@
+@@ -2210,4 +2210,371 @@
    ASSERT(!env.mayAlias(3,1));
  }
  
@@ -296,39 +334,180 @@
 +  checkProjectedCleanupMarker(true);
 +}
 +
-+TEST(segmented_stack_solved_output_unknown_companion) {
-+  for(bool stackCompanion : {true,false}) {
-+    SegmentedEnvironment env(true,"x86:LE:16:Protected Mode:default","e81000e81000cb");
-+    ASSERT_EQUALS(env.fd->numCalls(),2);
-+    FuncCallSpecs *first = env.fd->getCallSpecs(0);
-+    FuncCallSpecs *second = env.fd->getCallSpecs(1);
-+    first->setInternal(env.arch->getModel("__stdcall16near"),env.arch->types->getTypeVoid());
-+    second->setInternal(env.arch->getModel("__stdcall16near"),env.arch->types->getTypeVoid());
-+    const VarnodeData &sp(env.arch->getStackSpace()->getSpacebase(0));
-+    Address address(sp.space,sp.offset);
-+    Varnode *root = env.fd->setInputVarnode(env.fd->newVarnode(sp.size,address));
-+    PcodeOp *unknown = env.op(CPUI_INDIRECT,{root,env.fd->newVarnodeIop(first->getOp())});
-+    if (stackCompanion) env.fd->newVarnodeOut(sp.size,address,unknown);
-+    else env.fd->newUniqueOut(sp.size,unknown);
-+    PcodeOp *solved = env.op(CPUI_INDIRECT,{unknown->getOut(),env.fd->newVarnodeIop(second->getOp())});
-+    env.fd->newVarnodeOut(sp.size,address,solved);
-+    PcodeOp *merge = env.op(CPUI_MULTIEQUAL,{root,solved->getOut()});
-+    env.fd->newVarnodeOut(sp.size,address,merge);
-+    ActionStackPtrFlow flow("base",env.arch->getStackSpace());
-+    flow.reset(*env.fd);
-+    flow.apply(*env.fd);
-+    ASSERT_EQUALS(unknown->code(),CPUI_INDIRECT);
-+    ASSERT_EQUALS(first->getExtraPop(),ProtoModel::extrapop_unknown);
-+    ASSERT_EQUALS(second->getExtraPop(),ProtoModel::extrapop_unknown);
-+    ASSERT_EQUALS(first->getEffectiveExtraPop(),ProtoModel::extrapop_unknown);
-+    ASSERT_EQUALS(second->getEffectiveExtraPop(),ProtoModel::extrapop_unknown);
-+    for(PcodeOp *op : {solved,merge}) {
-+      ASSERT_EQUALS(op->code(),CPUI_INT_ADD);
-+      ASSERT_EQUALS(op->getIn(0),root);
-+      ASSERT(op->getIn(1)->isConstant());
-+      ASSERT_EQUALS(op->getIn(1)->getOffset(),0);
++static void lockStackObservationReturn(SegmentedEnvironment &env) {
++  ParameterPieces output;
++  output.addr = env.arch->translate->getRegister("AX").getAddr();
++  output.type = env.arch->types->getBase(2,TYPE_UINT);
++  output.flags = ParameterPieces::typelock;
++  env.fd->getFuncProto().setOutput(output);
++  env.fd->getFuncProto().setOutputLock(true);
++}
++
++static Varnode *stackObservationReturn(Funcdata *fd) {
++  Varnode *result = (Varnode *)0;
++  for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (!op->isDead() && op->code() == CPUI_RETURN && op->numInput() == 2) {
++      ASSERT(result == (Varnode *)0);
++      result = op->getIn(1);
 +    }
 +  }
++  ASSERT(result != (Varnode *)0);
++  ASSERT_EQUALS(result->getSize(),2);
++  return result;
++}
++
++static void checkDecodedUnknownStackCall(bool conditional) {
++  SegmentedEnvironment env(false,"x86:LE:16:Protected Mode:default",conditional ? "558bec85c07402ffd38bc48be55dc3" : "558becffd38bc48be55dc3");
++  lockStackObservationReturn(env);
++  ProtoModel *evaluation = env.arch->evalfp_called != (ProtoModel *)0 ? env.arch->evalfp_called : env.arch->defaultfp;
++  ASSERT_EQUALS(evaluation->getExtraPop(),ProtoModel::extrapop_unknown);
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*env.fd);
++  ASSERT(root->setBreakPoint(Action::tmpbreak_start,"stackptrflow"));
++  ASSERT_EQUALS(root->perform(*env.fd),-1);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *call = env.fd->getCallSpecs(0);
++  ASSERT_EQUALS(call->getOp()->code(),CPUI_CALLIND);
++  ASSERT_EQUALS(call->getOp()->getAddr(),env.fd->getAddress() + (conditional ? 7 : 3));
++  int4 initialExtra = call->getExtraPop();
++  int4 initialEffective = call->getEffectiveExtraPop();
++  ASSERT_EQUALS(initialExtra,ProtoModel::extrapop_unknown);
++  ASSERT_EQUALS(initialEffective,ProtoModel::extrapop_unknown);
++  const VarnodeData &sp(env.arch->getStackSpace()->getSpacebase(0));
++  Address stackaddr(sp.space,sp.offset);
++  if (conditional) {
++    bool join = false;
++    for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++      PcodeOp *op = (*iter).second;
++      if (op->isDead() || op->code() != CPUI_MULTIEQUAL || op->getOut()->getAddr() != stackaddr || op->getOut()->getSize() != sp.size) continue;
++      ASSERT_EQUALS(op->getParent()->getStart(),env.fd->getAddress()+9);
++      ASSERT_EQUALS(op->getParent()->sizeIn(),2);
++      ASSERT_EQUALS(op->numInput(),2);
++      join = true;
++    }
++    ASSERT(join);
++  }
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  call = env.fd->getCallSpecs(0);
++  Varnode *returned = stackObservationReturn(env.fd);
++  bool dependency = false;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->code() != CPUI_INDIRECT || op->isIndirectCreation()) continue;
++    if (op->getOut()->getAddr() != stackaddr || op->getOut()->getSize() != sp.size) continue;
++    if (op->getIn(1)->getSpace()->getType() == IPTR_IOP && PcodeOp::getOpFromConst(op->getIn(1)->getAddr()) == call->getOp())
++      dependency = dependency || tasm31DependsOn(returned,op->getOut());
++  }
++  if (call->getExtraPop() != ProtoModel::extrapop_unknown || call->getEffectiveExtraPop() != ProtoModel::extrapop_unknown || !dependency) {
++    cerr << "Decoded stack call: conditional=" << conditional << " initial extra/effective=" << initialExtra << "/" << initialEffective
++         << " final extra/effective=" << call->getExtraPop() << "/" << call->getEffectiveExtraPop() << " returned dependency=" << dependency << endl;
++    env.fd->printRaw(cerr);
++  }
++  ASSERT_EQUALS(call->getOp()->code(),CPUI_CALLIND);
++  ASSERT_EQUALS(call->getExtraPop(),ProtoModel::extrapop_unknown);
++  ASSERT_EQUALS(call->getEffectiveExtraPop(),ProtoModel::extrapop_unknown);
++  ASSERT(dependency);
++}
++
++TEST(segmented_conditional_call_cleanup_dependency) {
++  checkDecodedUnknownStackCall(true);
++}
++
++TEST(segmented_unknown_call_cleanup_dependency) {
++  checkDecodedUnknownStackCall(false);
++}
++
++static void checkDecodedStackBranch(bool equal) {
++  SegmentedEnvironment env(false,"x86:LE:16:Protected Mode:default",equal ? "558bec85c0740383ec008bc48be55dc3" : "558bec85c0740383ec028bc48be55dc3");
++  lockStackObservationReturn(env);
++  env.arch->allacts.getCurrent()->reset(*env.fd);
++  ASSERT(env.arch->allacts.getCurrent()->perform(*env.fd) >= 0);
++  Varnode *returned = stackObservationReturn(env.fd);
++  if (!equal) {
++    bool dependency = false;
++    for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++      PcodeOp *op = (*iter).second;
++      if (!op->isDead() && op->code() == CPUI_MULTIEQUAL && op->numInput() == 2 && tasm31DependsOn(returned,op->getOut())) {
++        ASSERT_EQUALS(op->getParent()->sizeIn(),2);
++        dependency = true;
++      }
++    }
++    if (!dependency) env.fd->printRaw(cerr);
++    ASSERT(dependency);
++    return;
++  }
++  Varnode *value = returned;
++  while(value->isWritten() && (value->getDef()->code() == CPUI_COPY || value->getDef()->code() == CPUI_CAST)) value = value->getDef()->getIn(0);
++  ASSERT(value->isWritten());
++  ASSERT_EQUALS(value->getSize(),2);
++  PcodeOp *op = value->getDef();
++  ASSERT(op->code() == CPUI_INT_ADD || op->code() == CPUI_INT_SUB || op->code() == CPUI_PTRSUB);
++  ASSERT(op->getIn(0)->isInput());
++  ASSERT_EQUALS(op->getIn(0)->getSize(),2);
++  ASSERT_EQUALS(op->getIn(0)->getAddr(),env.arch->getStackSpace()->getSpacebase(0).getAddr());
++  ASSERT(op->getIn(1)->isConstant());
++  uintb offset = op->getIn(1)->getOffset();
++  if (op->code() == CPUI_INT_SUB) offset = -offset;
++  ASSERT_EQUALS(offset & 0xffff,0xfffe);
++}
++
++TEST(segmented_differing_stack_join) {
++  checkDecodedStackBranch(false);
++}
++
++TEST(segmented_equal_stack_join) {
++  checkDecodedStackBranch(true);
++}
++
++static void checkDecodedStackMask(const string &bytes,uintb mask) {
++  SegmentedEnvironment env(false,"x86:LE:16:Protected Mode:default",bytes);
++  lockStackObservationReturn(env);
++  env.arch->allacts.getCurrent()->reset(*env.fd);
++  ASSERT(env.arch->allacts.getCurrent()->perform(*env.fd) >= 0);
++  Varnode *returned = stackObservationReturn(env.fd);
++  bool dependency = false;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->code() != CPUI_INT_AND || !tasm31DependsOn(returned,op->getOut())) continue;
++    ASSERT_EQUALS(op->getOut()->getSize(),2);
++    ASSERT(op->getIn(1)->isConstant());
++    ASSERT_EQUALS(op->getIn(1)->getOffset(),mask);
++    dependency = true;
++  }
++  if (mask != 0xffff) {
++    if (!dependency) env.fd->printRaw(cerr);
++    ASSERT(dependency);
++  }
++  else {
++    ASSERT(!dependency);
++    Varnode *value = returned;
++    while(value->isWritten() && (value->getDef()->code() == CPUI_COPY || value->getDef()->code() == CPUI_CAST)) value = value->getDef()->getIn(0);
++    ASSERT(value->isWritten());
++    ASSERT_EQUALS(value->getSize(),2);
++    PcodeOp *op = value->getDef();
++    ASSERT(op->code() == CPUI_INT_ADD || op->code() == CPUI_INT_SUB || op->code() == CPUI_PTRSUB);
++    ASSERT(op->getIn(0)->isInput());
++    ASSERT_EQUALS(op->getIn(0)->getSize(),2);
++    ASSERT_EQUALS(op->getIn(0)->getAddr(),env.arch->getStackSpace()->getSpacebase(0).getAddr());
++    ASSERT(op->getIn(1)->isConstant());
++    uintb offset = op->getIn(1)->getOffset();
++    if (op->code() == CPUI_INT_SUB) offset = -offset;
++    ASSERT_EQUALS(offset & 0xffff,0xfffe);
++  }
++}
++
++TEST(segmented_stack_mask_fff0) {
++  checkDecodedStackMask("558bec83e4f08bc48be55dc3",0xfff0);
++}
++
++TEST(segmented_stack_mask_f000) {
++  checkDecodedStackMask("558bec81e400f08bc48be55dc3",0xf000);
++}
++
++TEST(segmented_identity_stack_mask) {
++  checkDecodedStackMask("558bec81e4ffff8bc48be55dc3",0xffff);
 +}
 +
 +TEST(segmented_projected_aggregate_source_slice) {
