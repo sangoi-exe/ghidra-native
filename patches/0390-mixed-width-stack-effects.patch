@@ -1,0 +1,428 @@
+--- a/src/decompiler/coreaction.cc
++++ b/src/decompiler/coreaction.cc
+@@ -37,12 +37,12 @@
+ /// \brief A class that solves for stack-pointer changes across unknown sub-functions
+ class StackSolver {
+   vector<StackEqn> eqs;		///< Known equations based on operations that explicitly change the stack-pointer
+-  vector<StackEqn> guess;	///< Guessed equations for underdetermined systems
+   vector<Varnode *> vnlist;	///< The indexed set of variables, one for each reference to the stack-pointer
+   vector<int4> companion;	///< Index of companion input for variable produced by CPUI_INDIRECT
+   Address spacebase;		///< Starting address of the stack-pointer
+   vector<int4> soln;		///< Collected solutions (corresponding to array of variables)
+   int4 missedvariables;		///< Number of variables for which we are missing an equation
++  int4 rootIndex;		///< Index of the incoming formal stack-pointer value
+   void duplicate(void);		///< Duplicate each equation, multiplying by -1
+   void propagate(int4 varnum,int4 val);	///< Propagate solution for one variable to other variables
+ public:
+@@ -52,6 +52,7 @@
+   Varnode *getVariable(int4 i) const { return vnlist[i]; }	///< Get the i-th Varnode variable
+   int4 getCompanion(int4 i) const { return companion[i]; }	///< Get the i-th variable's companion index
+   int4 getSolution(int4 i) const { return soln[i]; }		///< Get the i-th variable's solution
++  int4 getRootIndex(void) const { return rootIndex; }
+ };
+ 
+ /// \param a is the first equation to compare
+@@ -117,31 +118,11 @@
+ void StackSolver::solve(void)
+ 
+ {
+-  // Use guesses to resolve subsystems not uniquely determined
+-  int4 i,size,var1,var2,count,lastcount;
+-
+   soln.clear();
+   soln.resize(vnlist.size(),65535); // Initialize solutions vector
+   duplicate();			// Duplicate and sort the equations
+ 
+-  propagate(0,0);		// We know one variable
+-  size = guess.size();
+-  lastcount = size+2;
+-  do {
+-    count = 0;
+-    for(i=0;i<size;++i) {
+-      var1 = guess[i].var1;
+-      var2 = guess[i].var2;
+-      if ((soln[var1]!=65535)&&(soln[var2]==65535))
+-	propagate(var2,soln[var1]-guess[i].rhs);
+-      else if ((soln[var1]==65535)&&(soln[var2]!=65535))
+-	propagate(var1,soln[var2]+guess[i].rhs);
+-      else if ((soln[var1]==65535)&&(soln[var2]==65535))
+-	count += 1;
+-    }
+-    if (count == lastcount) break;
+-    lastcount = count;
+-  } while(count > 0);
++  propagate(rootIndex,0);	// Offsets are relative to the incoming stack-pointer slice
+ }
+ 
+ /// Collect references to the stack-pointer as variables, and examine their defining PcodeOps
+@@ -167,12 +148,34 @@
+   }
+   missedvariables = 0;
+   if (vnlist.empty()) return;
+-  if (!vnlist[0]->isInput())
++  rootIndex = -1;
++  for(int4 i=0;i<vnlist.size();++i) {
++    if (vnlist[i]->isInput()) {
++      rootIndex = i;
++      break;
++    }
++  }
++  if (rootIndex < 0) {
++    Varnode *input = data.findCoveringInput(spacebasedata.size,spacebase);
++    if (input != (Varnode *)0) {
++      int4 offset = input->getAddr().justifiedContain(input->getSize(),spacebase,spacebasedata.size,false);
++      for(int4 i=0;i<vnlist.size();++i) {
++        PcodeOp *op = vnlist[i]->getDef();
++        if (op != (PcodeOp *)0 && op->code() == CPUI_SUBPIECE && op->getIn(0) == input &&
++            op->getIn(1)->isConstant() && op->getIn(1)->getOffset() == offset) {
++          rootIndex = i;
++          break;
++        }
++      }
++    }
++  }
++  if (rootIndex < 0)
+     throw LowlevelError("Input value of stackpointer is not used");
+ 
+   vector<Varnode *>::iterator iter;
+   StackEqn eqn;
+-  for(int4 i=1;i<vnlist.size();++i) {
++  for(int4 i=0;i<vnlist.size();++i) {
++    if (i == rootIndex) continue;
+     Varnode *vn = vnlist[i];
+     Varnode *othervn,*constvn;
+     PcodeOp *op = vn->getDef();
+@@ -221,8 +224,7 @@
+ 	}
+       }
+ 
+-      eqn.rhs = 4;		// Otherwise make a guess
+-      guess.push_back(eqn);
++      missedvariables += 1;
+     }
+     else if (op->code() == CPUI_MULTIEQUAL) {
+       for(int4 j=0;j<op->numInput();++j) {
+@@ -283,10 +285,12 @@
+   if (solver.getNumVariables() == 0) return;
+   solver.solve();		// Solve the equations
+ 
+-  Varnode *invn = solver.getVariable(0);
++  int4 rootIndex = solver.getRootIndex();
++  Varnode *invn = solver.getVariable(rootIndex);
+   bool warningprinted = false;
+ 
+-  for(int4 i=1;i<solver.getNumVariables();++i) {
++  for(int4 i=0;i<solver.getNumVariables();++i) {
++    if (i == rootIndex) continue;
+     Varnode *vn = solver.getVariable(i);
+     int4 soln = solver.getSolution(i);
+     if (soln == 65535) {
+--- a/src/decompiler/ruleaction.cc
++++ b/src/decompiler/ruleaction.cc
+@@ -1005,6 +1005,32 @@
+     Varnode *small1 = RulePullsubMulti::findSubpiece(basevn,newSize,op->getIn(1)->getOffset());
+     if (small1 == (Varnode *)0)
+       small1 = RulePullsubMulti::buildSubpiece(basevn,newSize,op->getIn(1)->getOffset(),data);
++    bool unaffected = false;
++    if ((targ_op->code() == CPUI_CALL || targ_op->code() == CPUI_CALLIND) && !indir->noIndirectCollapse()) {
++      FuncCallSpecs *fc = data.getCallSpecs(targ_op);
++      if (fc != (FuncCallSpecs *)0) {
++        AddrSpace *stackspace = data.getArch()->getStackSpace();
++        bool stackOverlap = false;
++        if (stackspace != (AddrSpace *)0) {
++          const VarnodeData &point(stackspace->getSpacebase(0));
++          Address stackaddr(point.space,point.offset);
++          stackOverlap = smalladdr2.overlap(0,stackaddr,point.size) >= 0 ||
++              stackaddr.overlap(0,smalladdr2,newSize) >= 0;
++        }
++        Varnode *callout = targ_op->getOut();
++        bool outputOverlap = callout != (Varnode *)0 &&
++            (callout->getAddr().overlap(0,smalladdr2,newSize) >= 0 ||
++             smalladdr2.overlap(0,callout->getAddr(),callout->getSize()) >= 0);
++        // Heritage can widen an earlier cleanup marker into this stack guard.
++        bool cleanupAccounted = fc->getExtraPop() == 0 || fc->getEffectiveExtraPop() != ProtoModel::extrapop_unknown;
++        unaffected = (!stackOverlap || cleanupAccounted) && !outputOverlap &&
++            fc->hasEffectTranslate(smalladdr2,newSize) == EffectRecord::unaffected;
++      }
++    }
++    if (unaffected) {
++      RulePullsubMulti::replaceDescendants(vn,small1,maxByte,minByte,data);
++      return 1;
++    }
+     // Create new indirect near original indirect
+     new_ind = data.newOp(2,indir->getAddr());
+     data.opSetOpcode(new_ind,CPUI_INDIRECT);
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -2210,4 +2210,115 @@
+   ASSERT(!env.mayAlias(3,1));
+ }
+ 
++static void checkProjectedCallEffect(const string &regname,int4 offset,bool preserved,bool protectedGuard = false,bool callOutput = false,bool pending = false) {
++  SegmentedEnvironment env(true,"x86:LE:16:Protected Mode:default","e81000cb");
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *fc = env.fd->getCallSpecs(0);
++  fc->setInternal(env.arch->getModel("__cdecl16far"),env.arch->types->getTypeVoid());
++  if (!pending) {
++    ActionExtraPopSetup setup("base",env.arch->getStackSpace());
++    setup.apply(*env.fd);
++  }
++  ASSERT_EQUALS(fc->getEffectiveExtraPop(),pending ? ProtoModel::extrapop_unknown : 4);
++  PcodeOp *call = fc->getOp();
++  VarnodeData storage = env.arch->translate->getRegister(regname);
++  Address address(storage.space,storage.offset);
++  Varnode *input = env.fd->setInputVarnode(env.fd->newVarnode(storage.size,address));
++  input->setConsume((uintb)0xffff << (8*offset));
++  PcodeOp *guard = env.op(CPUI_INDIRECT,{input,env.fd->newVarnodeIop(call)});
++  env.fd->newVarnodeOut(storage.size,address,guard);
++  if (protectedGuard) guard->setNoIndirectCollapse();
++  if (callOutput) env.fd->newVarnodeOut(2,address+offset,call);
++  PcodeOp *slice = env.op(CPUI_SUBPIECE,{guard->getOut(),env.constant(4,offset)},env.arch->types->getBase(2,TYPE_UINT));
++  PcodeOp *use = env.op(CPUI_COPY,{slice->getOut()},env.arch->types->getBase(2,TYPE_UINT));
++  ASSERT_EQUALS(fc->hasEffectTranslate(address,storage.size),EffectRecord::unknown_effect);
++  RulePullsubIndirect rule("base");
++  ASSERT_EQUALS(rule.applyOp(slice,*env.fd),1);
++  Varnode *result = use->getIn(0)->getDef()->getIn(0);
++  ASSERT_EQUALS(result->getDef()->code(),preserved ? CPUI_SUBPIECE : CPUI_INDIRECT);
++  if (preserved) {
++    ASSERT_EQUALS(result->getDef()->getIn(0),input);
++    ASSERT_EQUALS(result->getDef()->getIn(1)->getOffset(),offset);
++  }
++  else {
++    ASSERT_EQUALS(PcodeOp::getOpFromConst(result->getDef()->getIn(1)->getAddr()),call);
++  }
++}
++
++TEST(segmented_projected_unaffected_call_effect) {
++  checkProjectedCallEffect("ESP",0,true);
++  checkProjectedCallEffect("ESI",0,true);
++}
++
++TEST(segmented_projected_unknown_upper_call_effect) {
++  checkProjectedCallEffect("ESP",2,false);
++}
++
++TEST(segmented_projected_pending_cleanup) {
++  checkProjectedCallEffect("ESP",0,false,false,false,true);
++  checkProjectedCallEffect("ESI",0,true,false,false,true);
++}
++
++TEST(segmented_projected_protected_call_effect) {
++  checkProjectedCallEffect("ESP",0,false,true);
++  checkProjectedCallEffect("ESP",0,false,false,true);
++}
++
++static void checkProjectedCleanupMarker(bool lateKnown) {
++  SegmentedEnvironment env(true,"x86:LE:16:Protected Mode:default","e81000cb");
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *fc = env.fd->getCallSpecs(0);
++  fc->setInternal(env.arch->getModel("__stdcall16far"),env.arch->types->getTypeVoid());
++  ASSERT_EQUALS(fc->getExtraPop(),ProtoModel::extrapop_unknown);
++  ActionExtraPopSetup setup("base",env.arch->getStackSpace());
++  setup.apply(*env.fd);
++  ASSERT_EQUALS(fc->getEffectiveExtraPop(),ProtoModel::extrapop_unknown);
++  PcodeOp *marker = (PcodeOp *)0;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *candidate = (*iter).second;
++    if (candidate->code() == CPUI_INDIRECT && candidate->getIn(1)->getSpace()->getType() == IPTR_IOP &&
++        PcodeOp::getOpFromConst(candidate->getIn(1)->getAddr()) == fc->getOp()) marker = candidate;
++  }
++  ASSERT(marker != (PcodeOp *)0);
++  ASSERT_EQUALS(marker->getOut()->getSize(),2);
++  if (lateKnown) {
++    FuncProto restriction;
++    restriction.copy(*fc);
++    restriction.setExtraPop(4);
++    vector<Varnode *> inputs,outputs;
++    ASSERT(fc->lateRestriction(restriction,inputs,outputs));
++    ASSERT(!env.fd->hasRestartPending());
++    ASSERT_EQUALS(fc->getExtraPop(),4);
++    ASSERT_EQUALS(fc->getEffectiveExtraPop(),ProtoModel::extrapop_unknown);
++  }
++  Varnode *input = env.fd->setInputVarnode(env.fd->newVarnode(2,marker->getOut()->getAddr()));
++  input->setConsume(0xff);
++  env.fd->opSetInput(marker,input,0);
++  PcodeOp *slice = env.op(CPUI_SUBPIECE,{marker->getOut(),env.constant(4,0)},env.arch->types->getBase(1,TYPE_UINT));
++  PcodeOp *use = env.op(CPUI_COPY,{slice->getOut()},env.arch->types->getBase(1,TYPE_UINT));
++  ASSERT_EQUALS(fc->hasEffectTranslate(marker->getOut()->getAddr(),1),EffectRecord::unaffected);
++  RulePullsubIndirect rule("base");
++  ASSERT_EQUALS(rule.applyOp(slice,*env.fd),1);
++  Varnode *result = use->getIn(0)->getDef()->getIn(0);
++  ASSERT_EQUALS(result->getDef()->code(),CPUI_INDIRECT);
++  ASSERT_EQUALS(PcodeOp::getOpFromConst(result->getDef()->getIn(1)->getAddr()),fc->getOp());
++  ActionStackPtrFlow flow("base",env.arch->getStackSpace());
++  flow.reset(*env.fd);
++  flow.apply(*env.fd);
++  ASSERT_EQUALS(marker->code(),lateKnown ? CPUI_INT_ADD : CPUI_INDIRECT);
++  ASSERT_EQUALS(fc->getEffectiveExtraPop(),lateKnown ? 4 : ProtoModel::extrapop_unknown);
++  if (lateKnown) {
++    ASSERT_EQUALS(marker->getIn(0),input);
++    ASSERT_EQUALS(marker->getIn(1)->getOffset(),4);
++  }
++}
++
++TEST(segmented_projected_unknown_cleanup_marker) {
++  checkProjectedCleanupMarker(false);
++}
++
++TEST(segmented_projected_late_known_cleanup_marker) {
++  checkProjectedCleanupMarker(true);
++}
++
+ } // End namespace ghidra
+--- a/src/unittests/testsegmentedwide.cc
++++ b/src/unittests/testsegmentedwide.cc
+@@ -456,6 +456,153 @@
+   }
+ }
+ 
++TEST(protected_wide_stack_root_nonzero_position) {
++  WideEnvironment environment("cb");
++  Architecture *arch = environment.arch;
++  Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(Address(arch->getDefaultCodeSpace(),0x123400001000ULL),"stack_slice")->getFunction();
++  BlockBasic block(fd);
++  const VarnodeData &sp(arch->getStackSpace()->getSpacebase(0));
++  Address address(sp.space,sp.offset);
++  VarnodeData esp = arch->translate->getRegister("ESP");
++  Varnode *input = fd->setInputVarnode(fd->newVarnode(esp.size,Address(esp.space,esp.offset)));
++  PcodeOp *first = fd->newOp(2,fd->getAddress());
++  fd->opSetOpcode(first,CPUI_INT_ADD);
++  fd->newVarnodeOut(2,address,first);
++  PcodeOp *root = fd->newOp(2,fd->getAddress());
++  fd->opSetOpcode(root,CPUI_SUBPIECE);
++  fd->newVarnodeOut(2,address,root);
++  fd->opSetInput(root,input,0);
++  fd->opSetInput(root,fd->newConstant(4,0),1);
++  fd->opInsertEnd(root,&block);
++  fd->opSetInput(first,root->getOut(),0);
++  fd->opSetInput(first,fd->newConstant(2,0xfffc),1);
++  fd->opInsertEnd(first,&block);
++  PcodeOp *second = fd->newOp(2,fd->getAddress());
++  fd->opSetOpcode(second,CPUI_INT_ADD);
++  fd->newVarnodeOut(2,address,second);
++  fd->opSetInput(second,first->getOut(),0);
++  fd->opSetInput(second,fd->newConstant(2,0xfffc),1);
++  fd->opInsertEnd(second,&block);
++  ASSERT_EQUALS(*fd->beginLoc(2,address),first->getOut());
++  ASSERT_EQUALS(fd->findCoveringInput(2,address),input);
++  ActionStackPtrFlow action("base",arch->getStackSpace());
++  action.reset(*fd);
++  action.apply(*fd);
++  ASSERT_EQUALS(root->code(),CPUI_SUBPIECE);
++  ASSERT_EQUALS(root->getIn(0),input);
++  ASSERT_EQUALS(first->getIn(0),root->getOut());
++  ASSERT_EQUALS(first->getIn(1)->getOffset(),0xfffc);
++  ASSERT_EQUALS(second->getIn(0),root->getOut());
++  ASSERT_EQUALS(second->getIn(1)->getOffset(),0xfff8);
++  ASSERT(fd->findVarnodeInput(2,address) == (Varnode *)0);
++}
++
++// Full captured caller: equality is checked on SSA values, not merged high variables or printed C.
++static void checkCapturedFarCallerStackEffect(bool supplied) {
++  WideEnvironment environment("669c6660668bf46633c08cc866a3ee028cd066a3f202b8280066a312038bc466a3f6029affff00006633c08cc866a30a038bc466a30e0366c706e60202000000668be66661669dcb",0x300000000ULL,"x86:LE:16:Protected Mode:default",true);
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultCodeSpace();
++  Funcdata *fd = arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x300000000ULL),"far_measure")->getFunction();
++  if (supplied) {
++    FuncProto *prototype = new FuncProto();
++    prototype->setInternal(arch->getModel("__cdecl16far"),arch->types->getTypeVoid());
++    prototype->setInputLock(true);
++    prototype->setOutputLock(true);
++    prototype->setModelLock(true);
++    fd->getOverride().insertProtoOverride(Address(ram,0x300000023ULL),prototype);
++  }
++  arch->allacts.getCurrent()->reset(*fd);
++  ASSERT(arch->allacts.getCurrent()->perform(*fd) >= 0);
++  ASSERT_EQUALS(fd->numCalls(),1);
++  FuncCallSpecs *fc = fd->getCallSpecs(0);
++  ASSERT_EQUALS(fc->getOp()->code(),CPUI_CALLIND);
++  ASSERT_EQUALS(fc->isOverride(),supplied);
++  ASSERT_EQUALS(fc->getModelName(),supplied ? "__cdecl16far" : "__stdcall16near");
++  ASSERT_EQUALS(fc->getExtraPop(),supplied ? 4 : ProtoModel::extrapop_unknown);
++  ASSERT_EQUALS(fc->getEffectiveExtraPop(),supplied ? 4 : ProtoModel::extrapop_unknown);
++  Varnode *before = (Varnode *)0;
++  Varnode *after = (Varnode *)0;
++  Varnode *epilogue = (Varnode *)0;
++  Varnode *callEntry = (Varnode *)0;
++  for(PcodeOpTree::const_iterator iter=fd->beginOpAll();iter!=fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead()) continue;
++    if (op->code() == CPUI_STORE && op->getAddr() == Address(ram,0x30000001fULL)) before = op->getIn(2);
++    if (op->code() == CPUI_STORE && op->getAddr() == Address(ram,0x300000033ULL)) after = op->getIn(2);
++    if (op->code() == CPUI_SEGMENTOP && op->getAddr() == Address(ram,0x300000043ULL)) epilogue = op->getIn(2);
++    if (op->code() == CPUI_STORE && op->getAddr() == Address(ram,0x300000023ULL) &&
++        op->getIn(2)->isConstant() && op->getIn(2)->getSize() == 2 && op->getIn(2)->getOffset() == 0x28) {
++      ASSERT_EQUALS(op->getIn(1)->getDef()->code(),CPUI_SEGMENTOP);
++      callEntry = op->getIn(1)->getDef()->getIn(2);
++    }
++  }
++  ASSERT(before != (Varnode *)0);
++  ASSERT(after != (Varnode *)0);
++  ASSERT_EQUALS(before->getDef()->code(),CPUI_INT_ZEXT);
++  ASSERT_EQUALS(after->getDef()->code(),CPUI_INT_ZEXT);
++  Varnode *root = (Varnode *)0;
++  auto checkOffset = [&root](Varnode *value,uintb expected) {
++    ASSERT_EQUALS(value->getSize(),2);
++    ASSERT(value->isWritten());
++    PcodeOp *op = value->getDef();
++    if (op->code() == CPUI_CAST) {
++      value = op->getIn(0);
++      ASSERT_EQUALS(value->getSize(),2);
++      ASSERT(value->isWritten());
++      op = value->getDef();
++    }
++    ASSERT(op->code() == CPUI_INT_ADD || op->code() == CPUI_INT_SUB);
++    ASSERT_EQUALS(op->getIn(0)->getSize(),2);
++    ASSERT(op->getIn(1)->isConstant());
++    uintb offset = op->getIn(1)->getOffset();
++    if (op->code() == CPUI_INT_SUB) offset = -offset;
++    ASSERT_EQUALS(offset & 0xffff,expected);
++    if (root == (Varnode *)0) root = op->getIn(0);
++    else ASSERT_EQUALS(op->getIn(0),root);
++  };
++  checkOffset(before->getDef()->getIn(0),0xffdc);
++  ASSERT(callEntry != (Varnode *)0);
++  checkOffset(callEntry,0xffd8);
++  if (supplied) {
++    checkOffset(after->getDef()->getIn(0),0xffdc);
++  }
++  else {
++    Varnode *value = after->getDef()->getIn(0);
++    ASSERT_EQUALS(value->getSize(),2);
++    ASSERT(value->isWritten());
++    PcodeOp *guard = value->getDef();
++    if (guard->code() == CPUI_CAST) {
++      value = guard->getIn(0);
++      ASSERT_EQUALS(value->getSize(),2);
++      ASSERT(value->isWritten());
++      guard = value->getDef();
++    }
++    ASSERT_EQUALS(guard->code(),CPUI_INDIRECT);
++    ASSERT(!guard->isIndirectCreation());
++    ASSERT_EQUALS(guard->getIn(1)->getSpace()->getType(),IPTR_IOP);
++    ASSERT_EQUALS(PcodeOp::getOpFromConst(guard->getIn(1)->getAddr()),fc->getOp());
++    checkOffset(guard->getIn(0),0xffd8);
++  }
++  ASSERT(root->isWritten());
++  ASSERT_EQUALS(root->getDef()->code(),CPUI_SUBPIECE);
++  ASSERT(root->getDef()->getIn(0)->isInput());
++  ASSERT_EQUALS(root->getDef()->getIn(0)->getSize(),4);
++  ASSERT_EQUALS(root->getDef()->getIn(1)->getOffset(),0);
++  VarnodeData esp = arch->translate->getRegister("ESP");
++  ASSERT_EQUALS(root->getDef()->getIn(0)->getAddr(),Address(esp.space,esp.offset));
++  ASSERT_EQUALS(root->getDef()->getIn(0),fd->findCoveringInput(2,root->getAddr()));
++  ASSERT(epilogue != (Varnode *)0);
++  checkOffset(epilogue,0xfff8);
++}
++
++TEST(protected_wide_captured_far_caller_stack_effect) {
++  checkCapturedFarCallerStackEffect(true);
++}
++
++TEST(protected_wide_captured_far_caller_pending_cleanup) {
++  checkCapturedFarCallerStackEffect(false);
++}
++
+ // SELCHAIN measured CS1567, DS155f ->1567, unchanged RPL/ZF0 and equal CS/DS reads of b37a at code1:0a15.
+ TEST(protected_wide_captured_selector_chain) {
+   string bytes = "2ea1150a8cc8b9030063c88ed8a1150a90";
