@@ -36,7 +36,7 @@
 
  namespace ghidra {
 
-@@ -4877,6 +4878,294 @@
+@@ -4878,6 +4879,294 @@
    loadval->setSpacebasePlaceholder();
  }
 
@@ -331,7 +331,7 @@
  /// \brief Calculate the stack offset of \b this call site
  ///
  /// The given Varnode must be the input to the CALL in the \e placeholder slot
-@@ -4991,6 +5280,7 @@
+@@ -4992,6 +5281,7 @@
    res->effective_extrapop = effective_extrapop;
    res->stackoffset = stackoffset;
    res->paramshift = paramshift;
@@ -339,7 +339,66 @@
    // We are skipping activeinput, activeoutput
    res->isbadjumptable = isbadjumptable;
    res->copy(*this);		// Copy the FuncProto portion
-@@ -5176,7 +5466,13 @@
+@@ -5023,8 +5313,9 @@
+ /// \param vn is the Varnode holding the parameter (or NULL for a stack parameter)
+ /// \param param is the actual parameter description
+ /// \param stackref is the stack-pointer placeholder for \b this function
++/// \param byteOffset is the least-significant-byte displacement in the holding Varnode
+ /// \return the Varnode that exactly matches the parameter
+-Varnode *FuncCallSpecs::buildParam(Funcdata &data,Varnode *vn,ProtoParameter *param,Varnode *stackref)
++Varnode *FuncCallSpecs::buildParam(Funcdata &data,Varnode *vn,ProtoParameter *param,Varnode *stackref,int4 byteOffset)
+
+ {
+   if (vn == (Varnode *)0) { 	// Need to build a spacebase relative varnode
+@@ -5043,7 +5334,7 @@
+   if (vn->isFree() && !vn->isConstant() && !vn->hasNoDescend())
+     vn = data.newVarnode(vn->getSize(),vn->getAddr());
+   data.opSetInput(newop,vn,0);
+-  data.opSetInput(newop,data.newConstant(4,0),1);
++  data.opSetInput(newop,data.newConstant(4,byteOffset),1);
+   data.opInsertBefore(newop,op);
+   return newout;
+ }
+@@ -5056,20 +5347,21 @@
+ ///   - slot#  for the input Varnode to reuse
+ ///   - -1     if the parameter needs to be built from the stack
+ /// \param param is the given parameter to match
++/// \param byteOffset receives the justified displacement within the selected source trial
+ /// \return the encoded slot
+-int4 FuncCallSpecs::transferLockedInputParam(ProtoParameter *param)
+-
+-{
++int4 FuncCallSpecs::transferLockedInputParam(ProtoParameter *param,int4 &byteOffset)
++
++{
++  byteOffset = 0;
+   int4 numtrials = activeinput.getNumTrials();
+   Address startaddr = param->getAddress();
+   int4 sz = param->getSize();
+-  Address lastaddr = startaddr + (sz-1);
+   for(int4 i=0;i<numtrials;++i) {
+     ParamTrial &curtrial( activeinput.getTrial(i) );
+-    if (startaddr < curtrial.getAddress()) continue;
+-    Address trialend = curtrial.getAddress() + (curtrial.getSize() - 1);
+-    if (trialend < lastaddr) continue;
++    int4 offset = curtrial.getAddress().justifiedContain(curtrial.getSize(),startaddr,sz,false);
++    if (offset < 0) continue;
+     if (curtrial.isDefinitelyNotUsed()) return 0;	// Trial has already been stripped
++    byteOffset = offset;
+     return curtrial.getSlot();
+   }
+   if (startaddr.getSpace()->getType() == IPTR_SPACEBASE)
+@@ -5126,7 +5418,8 @@
+   int4 numparams = source.numParams();
+   Varnode *stackref = (Varnode *)0;
+   for(int4 i=0;i<numparams;++i) {
+-    int4 reuse = transferLockedInputParam(source.getParam(i));
++    int4 byteOffset;
++    int4 reuse = transferLockedInputParam(source.getParam(i),byteOffset);
+     if (reuse == 0) return false;
+     if (reuse > 0)
+       newinput.push_back(op->getIn(reuse));
+@@ -5177,20 +5470,36 @@
    Varnode *placeholder = (Varnode *)0;
    if (stackPlaceholderSlot>=0)
      placeholder = op->getIn(stackPlaceholderSlot);
@@ -351,13 +410,27 @@
 +    for(int4 i=0;i<activeinput.getNumTrials();++i)
 +      oldtrials.push_back(activeinput.getTrial(i));
 +  }
++
++  // Trial storage, not the representative's unique/constant address, determines the slice.
++  int4 numparams = numParams();
++  for(int4 i=0;i<numparams;++i) {
++    ProtoParameter *param = getParam(i);
++    int4 byteOffset;
++    transferLockedInputParam(param,byteOffset);
++    newinput[1+i] = buildParam(data,newinput[1+i],param,stackref,byteOffset);
++  }
 
    // Clear activeinput and old placeholder
    stackPlaceholderSlot = -1;
-@@ -5188,8 +5484,11 @@
+   int4 numPasses = activeinput.getNumPasses();
+   activeinput.clear();
+
+-  int4 numparams = numParams();
+   for(int4 i=0;i<numparams;++i) {
      ProtoParameter *param = getParam(i);
-     Varnode *vn = buildParam(data,newinput[1+i],param,stackref);
-     newinput[1+i] = vn;
+-    Varnode *vn = buildParam(data,newinput[1+i],param,stackref);
+-    newinput[1+i] = vn;
++    Varnode *vn = newinput[1+i];
 +    resolveInputStorage(param->getAddress(),param->getSize());
      activeinput.registerTrial(param->getAddress(),param->getSize());
      activeinput.getTrial(i).markActive(); // Parameter is not optional
@@ -366,7 +439,7 @@
      AddrSpace *paramSpace = param->getAddress().getSpace();
      if (noplacehold && paramSpace->getType() == IPTR_SPACEBASE &&
          (paramSpace != data.getArch()->getStackSpace() || data.getArch()->stackSegment.space == (AddrSpace *)0)) {
-@@ -5203,9 +5502,24 @@
+@@ -5204,9 +5513,24 @@
      newinput.push_back(placeholder);		// Add it at end of parameters
      setStackPlaceholderSlot(newinput.size()-1);
    }
@@ -392,7 +465,7 @@
    else {
      if (numPasses > 0)
        activeinput.finishPass();		// Don't totally reset the pass counter
-@@ -5699,6 +6013,18 @@
+@@ -5700,6 +6024,18 @@
    }
  }
 
@@ -411,7 +484,7 @@
  /// \brief Set the final input Varnodes to \b this CALL based on ParamActive analysis
  ///
  /// Varnodes that don't look like parameters are removed. Parameters that are unreferenced
-@@ -5733,10 +6059,14 @@
+@@ -5734,10 +6070,14 @@
      off = addr.getOffset();
      if (spc->getType() == IPTR_SPACEBASE) {
        isspacebase = true;
@@ -428,7 +501,7 @@
      }
      else {
        vn = op->getIn(paramtrial.getSlot()); // Where parameter is currently
-@@ -5755,8 +6085,9 @@
+@@ -5756,8 +6096,9 @@
        }
      }
      newparam.push_back(vn);
@@ -449,14 +522,19 @@
    ParamActive activeinput;	///< Info for recovering input parameters
    ParamActive activeoutput;	///< Info for recovering output parameters
    mutable vector<int4> inputConsume;	///< Number of bytes consumed by sub-function, for each input parameter
-@@ -1663,6 +1664,7 @@
+@@ -1663,9 +1664,10 @@
    bool isoutputactive;		///< Are we actively trying to recover output parameters
    bool isbadjumptable;		///< Was the call originally a jump-table we couldn't recover
    bool isstackoutputlock;	///< Do we have a locked output on the stack
 +  void resolveInputStorage(const Address &addr,int4 size);	///< Reconcile a whole unresolved cell with a selected input
    Varnode *getSpacebaseRelative(void) const;	///< Get the active stack-pointer Varnode at \b this call site
-   Varnode *buildParam(Funcdata &data,Varnode *vn,ProtoParameter *param,Varnode *stackref);
-   int4 transferLockedInputParam(ProtoParameter *param);
+-  Varnode *buildParam(Funcdata &data,Varnode *vn,ProtoParameter *param,Varnode *stackref);
+-  int4 transferLockedInputParam(ProtoParameter *param);
++  Varnode *buildParam(Funcdata &data,Varnode *vn,ProtoParameter *param,Varnode *stackref,int4 byteOffset);
++  int4 transferLockedInputParam(ProtoParameter *param,int4 &byteOffset);
+   void transferLockedOutputParam(ProtoParameter *param,vector<Varnode *> &newoutput);
+   bool transferLockedInput(vector<Varnode *> &newinput,const FuncProto &source);
+   bool transferLockedOutput(vector<Varnode *> &newoutput,const FuncProto &source);
 @@ -1716,6 +1718,8 @@
    void forceSet(Funcdata &data,const FuncProto &fp);
    void insertPcode(Funcdata &data);
@@ -515,7 +593,7 @@
    /// \brief Toggle whether data-type recovery will be performed on \b this function
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -2577,4 +2577,721 @@
+@@ -2577,4 +2577,857 @@
    ASSERT_EQUALS(PcodeOp::getOpFromConst(second->getIn(1)->getAddr()),fc->getOp());
  }
 
@@ -1234,6 +1312,142 @@
 +
 +TEST(variadic_mixed_prefix_late_tail) {
 +  checkMixedVariadicCall(true,true);
++}
++
++static Address packedInputSource(Varnode *value) {
++  int4 byteOffset = 0;
++  while(value->isWritten()) {
++    PcodeOp *def = value->getDef();
++    if (def->code() == CPUI_SUBPIECE) {
++      ASSERT(def->getIn(1)->isConstant());
++      byteOffset += def->getIn(1)->getOffset();
++    }
++    else if (def->code() == CPUI_INT_RIGHT) {
++      // RuleSubRight expresses an interior slice as a byte-aligned shift and low truncation.
++      ASSERT(def->getIn(1)->isConstant());
++      ASSERT_EQUALS(def->getIn(1)->getOffset()%8,0);
++      byteOffset += def->getIn(1)->getOffset()/8;
++    }
++    else {
++      ASSERT(def->code() == CPUI_COPY || def->code() == CPUI_CAST);
++    }
++    value = def->getIn(0);
++  }
++  ASSERT(byteOffset+4 <= value->getSize());
++  return value->getAddr()+byteOffset;
++}
++
++static void checkPackedFixedArguments(FuncCallSpecs *spec,Funcdata *callee,bool sliced) {
++  ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++  ASSERT(spec->isInputLocked());
++  ASSERT(spec->isDotdotdot());
++  ASSERT_EQUALS(spec->numParams(),2);
++  ASSERT_EQUALS(spec->getParam(0)->getName(),"first");
++  ASSERT_EQUALS(spec->getParam(1)->getName(),"second");
++  ASSERT_EQUALS(spec->getSpacebaseOffset(),FuncCallSpecs::offset_unknown);
++  PcodeOp *call = spec->getOp();
++  ASSERT_EQUALS(call->numInput(),3);
++  ASSERT(call->getIn(1) != call->getIn(2));
++  for(int4 i=0;i<2;++i) {
++    Varnode *arg = call->getIn(i+1);
++    ASSERT_EQUALS(arg->getSize(),4);
++    ASSERT(arg->isWritten());
++    if (sliced) {
++      ASSERT_EQUALS(packedInputSource(arg),Address(callee->getAddress().getSpace(),0x1080+4*i));
++    }
++    else {
++      ASSERT_EQUALS(arg->getDef()->code(),CPUI_LOAD);
++    }
++  }
++}
++
++static void checkPackedVariadicCall(bool indirect) {
++  // Exact 136-byte production witnesses: one MOVQ supplies two fixed stack arguments.
++  string bytes = indirect
++      ? "5589e583e4f083ec10f30f7e0580100000660fd60424b840100000ffd089ec5dc3000000000000000000000000000000000000000000000000000000000000008b4424046bc06403442408c3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000007000000"
++      : "5589e583e4f083ec10f30f7e0580100000660fd60424e82500000089ec5dc30000000000000000000000000000000000000000000000000000000000000000008b4424046bc06403442408c3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000007000000";
++  ASSERT_EQUALS(bytes.size(),272);
++  SegmentedEnvironment env(false,"x86:LE:32:default:gcc",bytes);
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  AddrSpace *stack = env.arch->getStackSpace();
++  Funcdata *callee = env.arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1040),"packed_target")->getFunction();
++  istringstream declaration("extern uint4 packed_target(uint4 first,uint4 second,...);");
++  parse_C(env.arch,declaration);
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),2);
++  for(int4 i=0;i<2;++i) {
++    ASSERT_EQUALS(callee->getFuncProto().getParam(i)->getAddress(),Address(stack,4+4*i));
++    ASSERT_EQUALS(callee->getFuncProto().getParam(i)->getSize(),4);
++  }
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*env.fd);
++  if (indirect) {
++    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"deindirect"));
++    ASSERT_EQUALS(root->perform(*env.fd),-1);
++    ASSERT_EQUALS(env.fd->numCalls(),1);
++    FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++    PcodeOp *call = spec->getOp();
++    ASSERT_EQUALS(call->code(),CPUI_CALLIND);
++    ASSERT_EQUALS(call->getAddr(),Address(ram,0x101b));
++    ASSERT(spec->isInputActive());
++    ASSERT(!spec->isInputLocked());
++    ASSERT(!spec->isOverride());
++    ASSERT(!env.fd->hasRestartPending());
++    ParamActive *active = spec->getActiveInput();
++    Varnode *source = (Varnode *)0;
++    for(int4 i=0;i<active->getNumTrials();++i) {
++      const ParamTrial &trial(active->getTrial(i));
++      ASSERT(!trial.isUnref());
++      ASSERT(trial.getSlot() > 0 && trial.getSlot() < call->numInput());
++      Varnode *vn = call->getIn(trial.getSlot());
++      if (trial.getAddress() == Address(stack,4) && trial.getSize() == 8)
++        source = vn;
++    }
++    ASSERT(source != (Varnode *)0);
++    ASSERT_EQUALS(source->getSize(),8);
++    ASSERT_EQUALS(packedInputSource(source),Address(ram,0x1080));
++    ASSERT(root->setBreakPoint(Action::tmpbreak_action,"deindirect"));
++    ASSERT_EQUALS(root->perform(*env.fd),-1);
++    ASSERT_EQUALS(env.fd->getCallSpecs(0),spec);
++    ASSERT_EQUALS(spec->getOp(),call);
++    ASSERT_EQUALS(call->code(),CPUI_CALL);
++    ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++    ASSERT(spec->isInputLocked());
++    ASSERT(spec->isDotdotdot());
++    ASSERT(!env.fd->hasRestartPending());
++    for(int4 i=0;i<2;++i) {
++      Varnode *arg = call->getIn(i+1);
++      ASSERT_EQUALS(arg->getSize(),4);
++      ASSERT(arg->isWritten());
++      PcodeOp *slice = arg->getDef();
++      ASSERT_EQUALS(slice->code(),CPUI_SUBPIECE);
++      ASSERT_EQUALS(slice->getIn(0),source);
++      ASSERT_EQUALS(spec->getParam(i)->getAddress(),Address(stack,4+4*i));
++      ASSERT(slice->getIn(1)->isConstant());
++      ASSERT_EQUALS(slice->getIn(1)->getOffset(),4*i);
++    }
++  }
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++  ASSERT_EQUALS(spec->getOp()->getAddr(),Address(ram,indirect ? 0x101b : 0x1016));
++  checkPackedFixedArguments(spec,callee,indirect);
++  ASSERT(!env.fd->hasRestartPending());
++  env.arch->clearAnalysis(env.fd);
++  ASSERT_EQUALS(env.fd->numCalls(),0);
++  ASSERT(env.arch->commentdb->beginComment(env.fd->getAddress()) == env.arch->commentdb->endComment(env.fd->getAddress()));
++  root->reset(*env.fd);
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  checkPackedFixedArguments(env.fd->getCallSpecs(0),callee,false);
++  ASSERT(!env.fd->hasRestartPending());
++}
++
++TEST(variadic_packed_fixed_early) {
++  checkPackedVariadicCall(false);
++}
++
++TEST(variadic_packed_fixed_late) {
++  checkPackedVariadicCall(true);
 +}
 +
  } // End namespace ghidra
