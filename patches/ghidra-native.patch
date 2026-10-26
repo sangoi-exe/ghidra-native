@@ -21,11 +21,11 @@ index ba8bb33..aa7aee1 100644
 diff --git a/src/decompiler/database.cc b/src/decompiler/database.cc
 --- a/src/decompiler/database.cc
 +++ b/src/decompiler/database.cc
-@@ -1945,5 +1945,14 @@
+@@ -1945,21 +1945,23 @@
  void ScopeInternal::addMapInternal(Symbol *sym,MapEntry *entry)
  {
-+  Address lastaddress = entry->addr + (entry->size-1);
-+  if (lastaddress.getOffset() < entry->addr.getOffset()) {
++  AddrSpace *spc = entry->addr.getSpace();
++  if (entry->addr.getOffset() > spc->getHighest() || !entry->addr.isValidRange(entry->size)) {
 +    string msg = "Symbol ";
 +    msg += sym->getName();
 +    msg += " extends beyond the end of the address space";
@@ -33,10 +33,13 @@ diff --git a/src/decompiler/database.cc b/src/decompiler/database.cc
 +    delete entry;
 +    throw LowlevelError(msg);
 +  }
++  Address lastaddress = entry->addr + (entry->size-1);
    sym->mapentry.push_back(entry);
    // Find or create the appropriate rangemap
-   AddrSpace *spc = entry->addr.getSpace();
-@@ -1953,14 +1962,7 @@
+-  AddrSpace *spc = entry->addr.getSpace();
+   EntryMap *rangemap = maptable[spc->getIndex()];
+   if (rangemap == (EntryMap *)0) {
+     rangemap = new EntryMap();
      maptable[spc->getIndex()] = rangemap;
    }
    // Insert the new map
@@ -50,7 +53,6 @@ diff --git a/src/decompiler/database.cc b/src/decompiler/database.cc
      
    entry->mapIterator = rangemap->insert(entry,entry->addr.getOffset(),lastaddress.getOffset());
    if (entry->size == sym->type->getSize()) {
-     sym->wholeCount += 1;
 diff --git a/src/decompiler/fspec.cc b/src/decompiler/fspec.cc
 index d87eb2f..b3a11e5 100644
 --- a/src/decompiler/fspec.cc

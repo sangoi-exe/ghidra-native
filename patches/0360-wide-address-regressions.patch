@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/unittests/testsegmentedwide.cc
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,684 @@
 +#include "architecture.hh"
 +#include "coreaction.hh"
 +#include "emulate.hh"
@@ -627,6 +627,58 @@
 +      ASSERT(global->queryContainer(Address(ram,offset),1,Address()) == (MapEntry *)0);
 +      named.clear();
 +      global->findByName("real_mapping",named);
++      ASSERT(named.empty());
++    }
++  }
++}
++
++TEST(real_mode_oversized_stack_mapping_cleanup) {
++  WideEnvironment environment("cb",0x1000,"x86:LE:16:Real Mode:default");
++  Architecture *arch = environment.arch;
++  AddrSpace *stack = arch->getStackSpace();
++  ASSERT_EQUALS(stack->getAddrSize(),2);
++  ASSERT_EQUALS(stack->getHighest(),0xffff);
++  Scope *global = arch->symboltab->getGlobalScope();
++  Datatype *byte = arch->types->getBase(1,TYPE_UINT);
++  for(int4 size : {65537,65536}) {
++    TypeArray *array = arch->types->getTypeArray(size,byte);
++    ASSERT_EQUALS(array->getSize(),size);
++    ostringstream xml;
++    XmlEncode encoder(xml);
++    encoder.openElement(ELEM_MAPSYM);
++    encoder.openElement(ELEM_SYMBOL);
++    encoder.writeString(ATTRIB_NAME,"stack_mapping");
++    array->encodeRef(encoder);
++    encoder.closeElement(ELEM_SYMBOL);
++    Address(stack,0).encode(encoder);
++    RangeList limits;
++    limits.encode(encoder);
++    encoder.closeElement(ELEM_MAPSYM);
++    istringstream input(xml.str());
++    XmlDecode decoder(arch);
++    decoder.ingestStream(input);
++    Symbol *symbol = global->addMapSym(decoder);
++    vector<Symbol *> named;
++    global->findByName("stack_mapping",named);
++    if (size == 65537) {
++      ASSERT(symbol == (Symbol *)0);
++      ASSERT(named.empty());
++      ASSERT(global->queryContainer(Address(stack,0),1,Address()) == (MapEntry *)0);
++      ASSERT(global->queryContainer(Address(stack,0xffff),1,Address()) == (MapEntry *)0);
++    }
++    else {
++      ASSERT(symbol != (Symbol *)0);
++      ASSERT_EQUALS(named.size(),1);
++      ASSERT_EQUALS(named[0],symbol);
++      MapEntry *mapping = global->queryContainer(Address(stack,0),size,Address());
++      ASSERT(mapping != (MapEntry *)0);
++      ASSERT_EQUALS(mapping->getSymbol(),symbol);
++      ASSERT_EQUALS(global->queryContainer(Address(stack,0xffff),1,Address()),mapping);
++      global->removeSymbol(symbol);
++      ASSERT(global->queryContainer(Address(stack,0),1,Address()) == (MapEntry *)0);
++      ASSERT(global->queryContainer(Address(stack,0xffff),1,Address()) == (MapEntry *)0);
++      named.clear();
++      global->findByName("stack_mapping",named);
 +      ASSERT(named.empty());
 +    }
 +  }
