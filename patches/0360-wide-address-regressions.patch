@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/unittests/testsegmentedwide.cc
-@@ -0,0 +1,585 @@
+@@ -0,0 +1,632 @@
 +#include "architecture.hh"
 +#include "coreaction.hh"
 +#include "emulate.hh"
@@ -583,6 +583,53 @@
 +
 +TEST(real_mode_near_pointer_global) {
 +  checkRealModePointerGlobal(2,0x5678);
++}
++
++TEST(real_mode_invalid_mapping_cleanup) {
++  WideEnvironment environment("cb",0x1000,"x86:LE:16:Real Mode:default");
++  Architecture *arch = environment.arch;
++  AddrSpace *ram = arch->getDefaultDataSpace();
++  ASSERT_EQUALS(ram->getAddrSize(),4);
++  Scope *global = arch->symboltab->getGlobalScope();
++  Datatype *word = arch->types->getBase(2,TYPE_UINT);
++  for(uintb offset : {0x100000000ULL,0x179b8ULL}) {
++    ostringstream xml;
++    XmlEncode encoder(xml);
++    encoder.openElement(ELEM_MAPSYM);
++    encoder.openElement(ELEM_SYMBOL);
++    encoder.writeString(ATTRIB_NAME,"real_mapping");
++    word->encodeRef(encoder);
++    encoder.closeElement(ELEM_SYMBOL);
++    Address(ram,offset).encode(encoder);
++    RangeList limits;
++    limits.encode(encoder);
++    encoder.closeElement(ELEM_MAPSYM);
++    istringstream input(xml.str());
++    XmlDecode decoder(arch);
++    decoder.ingestStream(input);
++    Symbol *symbol = global->addMapSym(decoder);
++    vector<Symbol *> named;
++    global->findByName("real_mapping",named);
++    if (offset == 0x100000000ULL) {
++      ASSERT(symbol == (Symbol *)0);
++      ASSERT(named.empty());
++      ASSERT(global->queryContainer(Address(ram,offset),1,Address()) == (MapEntry *)0);
++      ASSERT(global->queryContainer(Address(ram,0),1,Address()) == (MapEntry *)0);
++    }
++    else {
++      ASSERT(symbol != (Symbol *)0);
++      ASSERT_EQUALS(named.size(),1);
++      ASSERT_EQUALS(named[0],symbol);
++      MapEntry *mapping = global->queryContainer(Address(ram,offset),2,Address());
++      ASSERT(mapping != (MapEntry *)0);
++      ASSERT_EQUALS(mapping->getSymbol(),symbol);
++      global->removeSymbol(symbol);
++      ASSERT(global->queryContainer(Address(ram,offset),1,Address()) == (MapEntry *)0);
++      named.clear();
++      global->findByName("real_mapping",named);
++      ASSERT(named.empty());
++    }
++  }
 +}
 +
 +} // End namespace ghidra

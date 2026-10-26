@@ -18,6 +18,39 @@ index ba8bb33..aa7aee1 100644
     
  </compiler_spec>
  
+diff --git a/src/decompiler/database.cc b/src/decompiler/database.cc
+--- a/src/decompiler/database.cc
++++ b/src/decompiler/database.cc
+@@ -1945,5 +1945,14 @@
+ void ScopeInternal::addMapInternal(Symbol *sym,MapEntry *entry)
+ {
++  Address lastaddress = entry->addr + (entry->size-1);
++  if (lastaddress.getOffset() < entry->addr.getOffset()) {
++    string msg = "Symbol ";
++    msg += sym->getName();
++    msg += " extends beyond the end of the address space";
++    // A rejected entry has no range-map iterator and must not become symbol-owned.
++    delete entry;
++    throw LowlevelError(msg);
++  }
+   sym->mapentry.push_back(entry);
+   // Find or create the appropriate rangemap
+   AddrSpace *spc = entry->addr.getSpace();
+@@ -1953,14 +1962,7 @@
+     maptable[spc->getIndex()] = rangemap;
+   }
+   // Insert the new map
+-  Address lastaddress = entry->addr + (entry->size-1);
+-  if (lastaddress.getOffset() < entry->addr.getOffset()) {
+-    string msg = "Symbol ";
+-    msg += sym->getName();
+-    msg += " extends beyond the end of the address space";
+-    throw LowlevelError(msg);
+-  }
+     
+   entry->mapIterator = rangemap->insert(entry,entry->addr.getOffset(),lastaddress.getOffset());
+   if (entry->size == sym->type->getSize()) {
+     sym->wholeCount += 1;
 diff --git a/src/decompiler/fspec.cc b/src/decompiler/fspec.cc
 index d87eb2f..b3a11e5 100644
 --- a/src/decompiler/fspec.cc
