@@ -339,27 +339,49 @@
    // We are skipping activeinput, activeoutput
    res->isbadjumptable = isbadjumptable;
    res->copy(*this);		// Copy the FuncProto portion
-@@ -5178,7 +5468,8 @@
+@@ -5176,7 +5466,13 @@
    Varnode *placeholder = (Varnode *)0;
    if (stackPlaceholderSlot>=0)
      placeholder = op->getIn(stackPlaceholderSlot);
 -  bool noplacehold = true;
 +  // A variadic tail needs the dedicated call-SP reference, not a forwarded fixed input.
 +  bool noplacehold = !isDotdotdot() || placeholder == (Varnode *)0;
++  vector<ParamTrial> oldtrials;
++  if (isDotdotdot()) {
++    for(int4 i=0;i<activeinput.getNumTrials();++i)
++      oldtrials.push_back(activeinput.getTrial(i));
++  }
 
    // Clear activeinput and old placeholder
    stackPlaceholderSlot = -1;
-@@ -5188,6 +5479,7 @@
+@@ -5188,8 +5484,11 @@
      ProtoParameter *param = getParam(i);
      Varnode *vn = buildParam(data,newinput[1+i],param,stackref);
      newinput[1+i] = vn;
 +    resolveInputStorage(param->getAddress(),param->getSize());
      activeinput.registerTrial(param->getAddress(),param->getSize());
      activeinput.getTrial(i).markActive(); // Parameter is not optional
++    if (isDotdotdot())
++      activeinput.getTrial(i).setFixedPosition(i);
      AddrSpace *paramSpace = param->getAddress().getSpace();
-@@ -5204,8 +5496,11 @@
+     if (noplacehold && paramSpace->getType() == IPTR_SPACEBASE &&
+         (paramSpace != data.getArch()->getStackSpace() || data.getArch()->stackSegment.space == (AddrSpace *)0)) {
+@@ -5203,9 +5502,24 @@
+     newinput.push_back(placeholder);		// Add it at end of parameters
      setStackPlaceholderSlot(newinput.size()-1);
    }
++  for(int4 i=0;i<oldtrials.size();++i) {
++    const ParamTrial &trial(oldtrials[i]);
++    int4 overlap = activeinput.whichTrial(trial.getAddress(),trial.getSize());
++    if (overlap >= 0 && overlap < numparams)
++      continue;                         // The fixed prefix owns even partially overlapping storage.
++    int4 slot = newinput.size();
++    newinput.push_back(op->getIn(trial.getSlot()));
++    activeinput.registerTrial(trial.getAddress(),trial.getSize());
++    ParamTrial &restored(activeinput.getTrial(activeinput.getNumTrials()-1));
++    restored = trial;                   // Retain checked, inactive and conditional facts, not just the storage.
++    restored.setSlot(slot);
++  }
    data.opSetAllInput(op,newinput);
 -  if (!isDotdotdot())		// Unless we are looking for varargs
 +  if (!isDotdotdot()) {
@@ -370,7 +392,7 @@
    else {
      if (numPasses > 0)
        activeinput.finishPass();		// Don't totally reset the pass counter
-@@ -5699,6 +5994,18 @@
+@@ -5699,6 +6013,18 @@
    }
  }
 
@@ -389,7 +411,7 @@
  /// \brief Set the final input Varnodes to \b this CALL based on ParamActive analysis
  ///
  /// Varnodes that don't look like parameters are removed. Parameters that are unreferenced
-@@ -5733,10 +6040,14 @@
+@@ -5733,10 +6059,14 @@
      off = addr.getOffset();
      if (spc->getType() == IPTR_SPACEBASE) {
        isspacebase = true;
@@ -406,7 +428,7 @@
      }
      else {
        vn = op->getIn(paramtrial.getSlot()); // Where parameter is currently
-@@ -5755,8 +6066,9 @@
+@@ -5755,8 +6085,9 @@
        }
      }
      newparam.push_back(vn);
@@ -493,7 +515,7 @@
    /// \brief Toggle whether data-type recovery will be performed on \b this function
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -2577,4 +2577,585 @@
+@@ -2577,4 +2577,721 @@
    ASSERT_EQUALS(PcodeOp::getOpFromConst(second->getIn(1)->getAddr()),fc->getOp());
  }
 
@@ -1076,6 +1098,142 @@
 +
 +TEST(segmented_variadic_late_reused_cell_unresolved) {
 +  checkVariadicReusedCell(false,true);
++}
++
++static void checkMixedVariadicArguments(FuncCallSpecs *spec,bool tailFirst) {
++  PcodeOp *call = spec->getOp();
++  ASSERT(spec->isInputLocked());
++  ASSERT(spec->isDotdotdot());
++  ASSERT_EQUALS(spec->numParams(),2);
++  ASSERT_EQUALS(spec->getParam(0)->getName(),"tag");
++  ASSERT_EQUALS(spec->getParam(1)->getName(),"amount");
++  if (tailFirst) {
++    bool found = false;
++    for(int4 i=1;i<call->numInput();++i) {
++      Varnode *vn = call->getIn(i);
++      if (vn->isConstant() && vn->getSize() == 8 && vn->getOffset() == 33)
++        found = true;
++    }
++    ASSERT(found);
++  }
++  // Check the declared prefix independently of total arity or tail selection.
++  ASSERT(call->numInput() >= 3);
++  ASSERT(call->getIn(1)->isConstant());
++  ASSERT_EQUALS(call->getIn(1)->getOffset(),11);
++  ASSERT_EQUALS(call->getIn(1)->getSize(),4);
++  ASSERT(call->getIn(2)->isConstant());
++  ASSERT_EQUALS(call->getIn(2)->getOffset(),0x3ff4000000000000ULL);
++  ASSERT_EQUALS(call->getIn(2)->getSize(),8);
++  ASSERT_EQUALS(call->numInput(),4);
++  ASSERT(call->getIn(3)->isConstant());
++  ASSERT_EQUALS(call->getIn(3)->getOffset(),33);
++  ASSERT_EQUALS(call->getIn(3)->getSize(),8);
++}
++
++static void checkMixedVariadicCall(bool indirect,bool tailFirst) {
++  // Same 79-byte production witness, with only the call sequence and padding changed.
++  string bytes = indirect
++      ? "554889e54883ec10bf0b000000be2100000048b8000000000000f43f66480f6ec0b80100000041bb4010000041ffd3c9c30000000000000000000000000000006bc764f20f2cd06bd20a01d001f0c3"
++      : "554889e54883ec10bf0b000000be2100000048b8000000000000f43f66480f6ec0b801000000e815000000c9c3000000000000000000000000000000000000006bc764f20f2cd06bd20a01d001f0c3";
++  ASSERT_EQUALS(bytes.size(),158);
++  SegmentedEnvironment env(false,"x86:LE:64:default:gcc",bytes);
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  Funcdata *callee = env.arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1040),"mixed_target")->getFunction();
++  istringstream declaration("extern int4 mixed_target(int4 tag,float8 amount,...);");
++  parse_C(env.arch,declaration);
++  ASSERT(callee->getFuncProto().isInputLocked());
++  ASSERT(callee->getFuncProto().isDotdotdot());
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*env.fd);
++  if (indirect) {
++    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"deindirect"));
++    ASSERT_EQUALS(root->perform(*env.fd),-1);
++    ASSERT_EQUALS(env.fd->numCalls(),1);
++    FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++    PcodeOp *call = spec->getOp();
++    ASSERT_EQUALS(call->code(),CPUI_CALLIND);
++    ASSERT_EQUALS(call->getAddr(),Address(ram,0x102c));
++    ASSERT(spec->isInputActive());
++    ASSERT(!spec->isInputLocked());
++    ASSERT(!spec->isOverride());
++    ASSERT(spec->getEntryAddress().isInvalid());
++    vector<ParamTrial> oldtrials;
++    vector<Varnode *> oldinputs;
++    ParamActive *active = spec->getActiveInput();
++    for(int4 i=0;i<active->getNumTrials();++i) {
++      const ParamTrial &trial(active->getTrial(i));
++      ASSERT(!trial.isUnref());
++      ASSERT(trial.getSlot() > 0 && trial.getSlot() < call->numInput());
++      oldtrials.push_back(trial);
++      oldinputs.push_back(call->getIn(trial.getSlot()));
++    }
++    ProtoParameter *tag = callee->getFuncProto().getParam(0);
++    int4 tagTrial = active->whichTrial(tag->getAddress(),tag->getSize());
++    ASSERT(tagTrial >= 0);
++    ASSERT(active->getTrial(tagTrial).getSize() > tag->getSize());
++    ASSERT(root->setBreakPoint(Action::tmpbreak_action,"deindirect"));
++    ASSERT_EQUALS(root->perform(*env.fd),-1);
++    // Observe the real deindirection before the restart group can hide a restart.
++    ASSERT_EQUALS(env.fd->getCallSpecs(0),spec);
++    ASSERT_EQUALS(spec->getOp(),call);
++    ASSERT_EQUALS(call->code(),CPUI_CALL);
++    ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++    ASSERT(spec->isInputLocked());
++    ASSERT(spec->isDotdotdot());
++    ASSERT(spec->isInputActive());
++    ASSERT(!env.fd->hasRestartPending());
++    for(int4 i=0;i<oldtrials.size();++i) {
++      const ParamTrial &old(oldtrials[i]);
++      int4 index = active->whichTrial(old.getAddress(),old.getSize());
++      ASSERT(index >= 0);
++      if (index < spec->numParams()) continue;
++      const ParamTrial &restored(active->getTrial(index));
++      ASSERT_EQUALS(restored.getAddress(),old.getAddress());
++      ASSERT_EQUALS(restored.getSize(),old.getSize());
++      ASSERT_EQUALS(call->getIn(restored.getSlot()),oldinputs[i]);
++      ASSERT_EQUALS(restored.isChecked(),old.isChecked());
++      ASSERT_EQUALS(restored.isActive(),old.isActive());
++      ASSERT_EQUALS(restored.isDefinitelyNotUsed(),old.isDefinitelyNotUsed());
++      ASSERT_EQUALS(restored.isUsed(),old.isUsed());
++      ASSERT_EQUALS(restored.isKilledByCall(),old.isKilledByCall());
++      ASSERT_EQUALS(restored.hasCondExeEffect(),old.hasCondExeEffect());
++      ASSERT_EQUALS(restored.isRemFormed(),old.isRemFormed());
++      ASSERT_EQUALS(restored.isIndCreateFormed(),old.isIndCreateFormed());
++      ASSERT_EQUALS(restored.hasAncestorRealistic(),old.hasAncestorRealistic());
++      ASSERT_EQUALS(restored.hasAncestorSolid(),old.hasAncestorSolid());
++    }
++    int4 overlappingTag = 0;
++    for(int4 i=0;i<active->getNumTrials();++i) {
++      const ParamTrial &trial(active->getTrial(i));
++      if (tag->getAddress().overlap(0,trial.getAddress(),trial.getSize()) >= 0)
++        ++overlappingTag;
++    }
++    ASSERT_EQUALS(overlappingTag,1);
++  }
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++  ASSERT_EQUALS(spec->getOp()->getAddr(),Address(ram,indirect ? 0x102c : 0x1026));
++  ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++  checkMixedVariadicArguments(spec,tailFirst);
++  env.arch->clearAnalysis(env.fd);
++  ASSERT_EQUALS(env.fd->numCalls(),0);
++  root->reset(*env.fd);
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  checkMixedVariadicArguments(env.fd->getCallSpecs(0),tailFirst);
++}
++
++TEST(variadic_mixed_prefix_early) {
++  checkMixedVariadicCall(false,false);
++}
++
++TEST(variadic_mixed_prefix_late_order) {
++  checkMixedVariadicCall(true,false);
++}
++
++TEST(variadic_mixed_prefix_late_tail) {
++  checkMixedVariadicCall(true,true);
 +}
 +
  } // End namespace ghidra
