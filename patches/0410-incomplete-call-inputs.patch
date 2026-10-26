@@ -1,0 +1,559 @@
+diff --git a/src/decompiler/coreaction.cc b/src/decompiler/coreaction.cc
+--- a/src/decompiler/coreaction.cc
++++ b/src/decompiler/coreaction.cc
+@@ -3458,6 +3458,8 @@
+   if (firstuse == (PcodeOp *)0) return;
+
+   if (!firstuse->isCall()) return;
++  FuncCallSpecs *fc = data.getCallSpecs(firstuse);
++  if (fc != (FuncCallSpecs *)0 && fc->hasStorageInputs()) return;
+   if (firstuse->getOut() != (Varnode *)0) return;
+   if (firstuse->numInput() < 2) return;		// Must have at least 1 parameter (plus destination varnode)
+   if (firstuse->getIn(1) != vn) return;		// First parameter must result of new
+@@ -4132,7 +4134,7 @@
+ {
+   PcodeOp *callOp = fc->getOp();
+   pushConsumed(~((uintb)0),callOp->getIn(0),worklist);		// In all cases the first operand is fully consumed
+-  if (fc->isInputLocked() || fc->isInputActive()) {		// If the prototype is locked in, or in active recovery
++  if (fc->isInputLocked() || fc->isInputActive() || fc->hasStorageInputs()) {
+     for(int4 i=1;i<callOp->numInput();++i)
+       pushConsumed(~((uintb)0),callOp->getIn(i),worklist);	// Treat all parameters as fully consumed
+     return;
+diff --git a/src/decompiler/fspec.cc b/src/decompiler/fspec.cc
+--- a/src/decompiler/fspec.cc
++++ b/src/decompiler/fspec.cc
+@@ -5282,6 +5282,7 @@
+   res->stackoffset = stackoffset;
+   res->paramshift = paramshift;
+   res->unresolvedInputStorages = unresolvedInputStorages;
++  res->storageInputs = storageInputs;
+   // We are skipping activeinput, activeoutput
+   res->isbadjumptable = isbadjumptable;
+   res->copy(*this);		// Copy the FuncProto portion
+@@ -5353,6 +5354,14 @@
+
+ {
+   byteOffset = 0;
++  for(int4 i=0;i<storageInputs.size();++i) {
++    const VarnodeData &storage(storageInputs[i]);
++    int4 offset = storage.getAddr().justifiedContain(storage.size,param->getAddress(),param->getSize(),false);
++    if (offset >= 0) {
++      byteOffset = offset;
++      return i+1;
++    }
++  }
+   int4 numtrials = activeinput.getNumTrials();
+   Address startaddr = param->getAddress();
+   int4 sz = param->getSize();
+@@ -5526,6 +5535,7 @@
+     restored.setSlot(slot);
+   }
+   data.opSetAllInput(op,newinput);
++  storageInputs.clear();
+   if (!isDotdotdot()) {
+     // A supplied fixed list supersedes inferred uncertainty; a varargs prefix does not close its tail.
+     unresolvedInputStorages.clear();
+@@ -5697,7 +5707,7 @@
+ bool FuncCallSpecs::checkInputJoin(int4 slot1,bool ishislot,Varnode *vn1,Varnode *vn2) const
+
+ {
+-  if (isInputActive()) return false;
++  if (isInputActive() || hasStorageInputs()) return false;
+   if (slot1 >= activeinput.getNumTrials()) return false; // Not enough params
+   const ParamTrial *hislot,*loslot;
+   if (ishislot) {		// slot1 looks like the high slot
+@@ -6036,6 +6046,27 @@
+   }
+ }
+
++/// Operand correspondence is positional, but the storage geometry does not assert a source parameter position.
++const VarnodeData *FuncCallSpecs::getInputStorage(int4 slot) const
++
++{
++  if (slot < 1 || slot > storageInputs.size()) return (const VarnodeData *)0;
++  return &storageInputs[slot-1];
++}
++
++/// A completed positive-use snapshot is independent of formal model selection and establishes no negative facts.
++bool FuncCallSpecs::hasObservedInputUse(const ParamTrial &trial) const
++
++{
++  if (fd == (Funcdata *)0) return false;
++  const vector<VarnodeData> &observed(fd->getObservedInputStorages());
++  for(int4 i=0;i<observed.size();++i) {
++    if (observed[i].getAddr() == trial.getAddress() && observed[i].size == trial.getSize())
++      return true;
++  }
++  return false;
++}
++
+ /// \brief Set the final input Varnodes to \b this CALL based on ParamActive analysis
+ ///
+ /// Varnodes that don't look like parameters are removed. Parameters that are unreferenced
+@@ -6045,6 +6076,16 @@
+ void FuncCallSpecs::buildInputFromTrials(Funcdata &data)
+
+ {
++  bool incomplete = false;
++  if (!isInputLocked()) {
++    for(int4 i=0;i<activeinput.getNumTrials();++i) {
++      const ParamTrial &trial(activeinput.getTrial(i));
++      if (!trial.isUsed() && !trial.isUnref() && !trial.isDefinitelyNotUsed() && hasObservedInputUse(trial)) {
++        incomplete = true;
++        break;
++      }
++    }
++  }
+   AddrSpace *spc;
+   uintb off;
+   int4 sz;
+@@ -6062,7 +6103,11 @@
+
+   for(int4 i=0;i<activeinput.getNumTrials();++i) {
+     const ParamTrial &paramtrial( activeinput.getTrial(i) );
+-    if (!paramtrial.isUsed()) continue; // Don't keep unused parameters
++    if (incomplete) {
++      if (paramtrial.isUnref() || paramtrial.isDefinitelyNotUsed()) continue;
++      if (!paramtrial.isUsed() && !hasObservedInputUse(paramtrial)) continue;
++    }
++    else if (!paramtrial.isUsed()) continue; // Don't keep unused parameters
+     sz = paramtrial.getSize();
+     isspacebase = false;
+     const Address &addr(paramtrial.getAddress());
+@@ -6096,13 +6141,26 @@
+       }
+     }
+     newparam.push_back(vn);
++    if (incomplete) {
++      VarnodeData storage;
++      storage.space = spc;
++      storage.offset = addr.getOffset();
++      storage.size = sz;
++      storageInputs.push_back(storage);
++    }
+     resolveInputStorage(addr,sz);
+     // Mark the stack range used to pass this parameter as unmapped
+     if (isspacebase && stackoffset != offset_unknown)
+       data.getScopeLocal()->markNotMapped(spc,off,sz,true);
+   }
+   data.opSetAllInput(op,newparam); // Set final parameter list
+-  activeinput.deleteUnusedTrials();
++  if (incomplete) {
++    // Storage-qualified operands are not a completed formal trial list.
++    activeinput.clear();
++    inputConsume.clear();
++  }
++  else
++    activeinput.deleteUnusedTrials();
+ }
+
+ /// \brief Check if given two Varnodes are merged into a whole
+@@ -6235,7 +6293,7 @@
+ int4 FuncCallSpecs::getInputBytesConsumed(int4 slot) const
+
+ {
+-  if (slot >= inputConsume.size())
++  if (hasStorageInputs() || slot >= inputConsume.size())
+     return 0;
+   return inputConsume[slot];
+ }
+@@ -6252,6 +6310,7 @@
+ bool FuncCallSpecs::setInputBytesConsumed(int4 slot,int4 val) const
+
+ {
++  if (hasStorageInputs()) return false;
+   while(inputConsume.size() <= slot)
+     inputConsume.push_back(0);
+   int4 oldVal = inputConsume[slot];
+diff --git a/src/decompiler/fspec.hh b/src/decompiler/fspec.hh
+--- a/src/decompiler/fspec.hh
++++ b/src/decompiler/fspec.hh
+@@ -1657,6 +1657,7 @@
+   int4 paramshift;		///< Number of input parameters to ignore before prototype
+   int4 matchCallCount;		///< Number of calls to this sub-function within the calling function
+   vector<VarnodeData> unresolvedInputStorages;	///< Competing-role call-relative cells, independent of disposable trials
++  vector<VarnodeData> storageInputs;	///< Incomplete mapping: entry i describes CALL operand i+1, never a source parameter index
+   ParamActive activeinput;	///< Info for recovering input parameters
+   ParamActive activeoutput;	///< Info for recovering output parameters
+   mutable vector<int4> inputConsume;	///< Number of bytes consumed by sub-function, for each input parameter
+@@ -1664,6 +1665,7 @@
+   bool isoutputactive;		///< Are we actively trying to recover output parameters
+   bool isbadjumptable;		///< Was the call originally a jump-table we couldn't recover
+   bool isstackoutputlock;	///< Do we have a locked output on the stack
++  bool hasObservedInputUse(const ParamTrial &trial) const;	///< Does completed callee analysis positively use this exact storage?
+   void resolveInputStorage(const Address &addr,int4 size);	///< Reconcile a whole unresolved cell with a selected input
+   Varnode *getSpacebaseRelative(void) const;	///< Get the active stack-pointer Varnode at \b this call site
+   Varnode *buildParam(Funcdata &data,Varnode *vn,ProtoParameter *param,Varnode *stackref,int4 byteOffset);
+@@ -1710,6 +1712,10 @@
+   bool isStackOutputLock(void) const { return isstackoutputlock; }	///< Return \b true if return value is locked and on the stack
+   ParamActive *getActiveInput(void) { return &activeinput; }	///< Get the analysis object for input parameter recovery
+   ParamActive *getActiveOutput(void) { return &activeoutput; }	///< Get the analysis object for return value recovery
++
++  bool hasStorageInputs(void) const { return !storageInputs.empty(); }	///< Are current operands storage-qualified rather than source-positioned?
++  const VarnodeData *getInputStorage(int4 slot) const;	///< Get incomplete input geometry for an operand slot, or NULL
++  ProtoParameter *getInputParameter(int4 slot) const { return hasStorageInputs() || slot < 1 ? (ProtoParameter *)0 : getParam(slot-1); }	///< Get a formal parameter only when the current operand has a source position
+
+   bool checkInputJoin(int4 slot1,bool ishislot,Varnode *vn1,Varnode *vn2) const;
+   void doInputJoin(int4 slot1,bool ishislot);
+diff --git a/src/decompiler/funcdata_varnode.cc b/src/decompiler/funcdata_varnode.cc
+--- a/src/decompiler/funcdata_varnode.cc
++++ b/src/decompiler/funcdata_varnode.cc
+@@ -1858,21 +1858,21 @@
+   int4 j = op->getSlot(vn);
+   if (j<=0) return false;	// Flow traces to indirect call variable, definitely not a param
+   FuncCallSpecs	*fc = getCallSpecs(op);
+   FuncCallSpecs *matchfc = getCallSpecs(opmatch);
+   if (op->code() == opmatch->code()) {
+     bool isdirect = (opmatch->code() == CPUI_CALL);
+     if ((isdirect&&(matchfc->getEntryAddress() == fc->getEntryAddress())) ||
+-	((!isdirect)&&(op->getIn(0) == opmatch->getIn(0)))) { // If it is a call to the same function
++	((!isdirect)&&(op->getIn(0) == opmatch->getIn(0)))) { // If it is a call to the same function
+-      // Varnode addresses are unreliable for this test because copy propagation may have occurred
+-      // So we check the actual ParamTrial which holds the original address
+-//	  if (j == 0) return false;
+-      const ParamTrial &curtrial( fc->getActiveInput()->getTrialForInputVarnode(j) );
+-      if (curtrial.getAddress() == trial.getAddress()) { // Check for same memory location
++      // Copy propagation changes representative addresses, not the original passing storage.
++      const VarnodeData *storage = fc->getInputStorage(j);
++      Address inputAddress = storage != (const VarnodeData *)0 ? storage->getAddr() :
++          fc->getActiveInput()->getTrialForInputVarnode(j).getAddress();
++      if (inputAddress == trial.getAddress()) { // Check for same memory location
+-	if (op->getParent() == opmatch->getParent()) {
++	if (op->getParent() == opmatch->getParent()) {
+-	  if (opmatch->getSeqNum().getOrder() < op->getSeqNum().getOrder())
++	  if (opmatch->getSeqNum().getOrder() < op->getSeqNum().getOrder())
+-	    return true;	// opmatch has dibs, don't reject
++	    return true;	// opmatch has dibs, don't reject
+-	  // If use op occurs earlier than match op, we might still need to reject
++	  // If use op occurs earlier than match op, we might still need to reject
+-	}
++	}
+-	else
++	else
+-	  return true;		// Same function, different basic blocks, assume legit doubleuse
++	  return true;		// Same function, different basic blocks, assume legit doubleuse
+       }
+diff --git a/src/decompiler/printc.cc b/src/decompiler/printc.cc
+--- a/src/decompiler/printc.cc
++++ b/src/decompiler/printc.cc
+@@ -658,9 +658,46 @@
+   emit->closeParen(CLOSE_PAREN,id);
+ }
+
++/// Storage inputs are real operands, but their order is not a source argument list.
++void PrintC::opStorageCall(const PcodeOp *op,const FuncCallSpecs *fc)
++
++{
++  pushOp(&function_call,op);
++  pushAtom(Atom("__call_incomplete",optoken,EmitMarkup::no_color,op));
++  for(int4 i=1;i<op->numInput();++i)
++    pushOp(&comma,op);
++  if (op->code() == CPUI_CALLIND)
++    pushVn(op->getIn(0),op,mods);
++  else {
++    Funcdata *callee = fc->getFuncdata();
++    if (callee != (Funcdata *)0)
++      pushSymbolScope(callee->getSymbol());
++    string name = fc->getName().empty() ? genericFunctionName(fc->getEntryAddress()) : fc->getName();
++    pushAtom(Atom(name,functoken,EmitMarkup::funcname_color,op,(const Funcdata *)0));
++  }
++  for(int4 i=1;i<op->numInput();++i) {
++    const VarnodeData &storage(*fc->getInputStorage(i));
++    pushOp(&function_call,op);
++    pushAtom(Atom("__input_storage",optoken,EmitMarkup::no_color,op));
++    for(int4 j=0;j<3;++j)
++      pushOp(&comma,op);
++    pushAtom(Atom("\"" + storage.space->getName() + "\"",syntax,EmitMarkup::const_color));
++    ostringstream offset;
++    offset << "0x" << hex << storage.offset;
++    pushAtom(Atom(offset.str(),syntax,EmitMarkup::const_color));
++    pushAtom(Atom(to_string(storage.size),syntax,EmitMarkup::const_color));
++    pushVn(op->getIn(i),op,mods);
++  }
++}
++
+ void PrintC::opCall(const PcodeOp *op)
+
+ {
++  const FuncCallSpecs *storageCall = op->getParent()->getFuncdata()->getCallSpecs(op);
++  if (storageCall != (const FuncCallSpecs *)0 && storageCall->hasStorageInputs()) {
++    opStorageCall(op,storageCall);
++    return;
++  }
+   pushOp(&function_call,op);
+   const Varnode *callpoint = op->getIn(0);
+   FuncCallSpecs *fc;
+@@ -705,12 +742,16 @@
+ void PrintC::opCallind(const PcodeOp *op)
+
+ {
+-  pushOp(&function_call,op);
+-  pushOp(&dereference,op);
+   const Funcdata *fd = op->getParent()->getFuncdata();
+   FuncCallSpecs *fc = fd->getCallSpecs(op);
+   if (fc == (FuncCallSpecs *)0)
+     throw LowlevelError("Missing indirect function callspec");
++  if (fc->hasStorageInputs()) {
++    opStorageCall(op,fc);
++    return;
++  }
++  pushOp(&function_call,op);
++  pushOp(&dereference,op);
+   int4 skip = getHiddenThisSlot(op, fc);
+   int4 count = op->numInput() - 1;
+   count -= (skip < 0) ? 0 : 1;
+diff --git a/src/decompiler/printc.hh b/src/decompiler/printc.hh
+--- a/src/decompiler/printc.hh
++++ b/src/decompiler/printc.hh
+@@ -25,6 +25,7 @@
+ namespace ghidra {
+
+ class FuncProto;
++class FuncCallSpecs;
+ class JumpTable;
+
+ /// \brief Factory and static initializer for the "c-language" back-end to the decompiler
+@@ -208,6 +209,7 @@
+   void emitCommentBlockTree(const FlowBlock *bl);	///< Emit any comments under the given control-flow subtree
+   void emitCommentFuncHeader(const Funcdata *fd);	///< Emit comments in the given function's header
+   void emitForLoop(const BlockWhileDo *bl);		///< Emit block as a \e for loop
++  void opStorageCall(const PcodeOp *op,const FuncCallSpecs *fc);	///< Push analysis-only storage-qualified call notation
+   void opFunc(const PcodeOp *op);			///< Push a \e functional expression based on the given p-code op to the RPN stack
+   void opTypeCast(const PcodeOp *op);			///< Push the given p-code op using type-cast syntax to the RPN stack
+   void opHiddenFunc(const PcodeOp *op);			///< Push the given p-code op as a hidden token
+diff --git a/src/decompiler/subflow.cc b/src/decompiler/subflow.cc
+--- a/src/decompiler/subflow.cc
++++ b/src/decompiler/subflow.cc
+@@ -218,7 +218,7 @@
+   }
+   FuncCallSpecs *fc = fd->getCallSpecs(op);
+   if (fc == (FuncCallSpecs *)0) return false;
+-  if (fc->isInputActive()) return false; // Don't trim while in the middle of figuring out params
++  if (fc->isInputActive() || fc->hasStorageInputs()) return false; // Preserve recovering inputs and observed storage geometry
+   if (fc->isInputLocked() && (!fc->isDotdotdot())) return false;
+
+   patchlist.emplace_back();
+diff --git a/src/decompiler/typeop.cc b/src/decompiler/typeop.cc
+--- a/src/decompiler/typeop.cc
++++ b/src/decompiler/typeop.cc
+@@ -755,7 +755,7 @@
+   // Its false to assume that the parameter symbol corresponds
+   // to the varnode in the same slot, but this is easiest until
+   // we get giant sized parameters working properly
+-  ProtoParameter *param = fc->getParam(slot - 1);
++  ProtoParameter *param = fc->getInputParameter(slot);
+   if (param != (ProtoParameter*) 0) {
+     if (param->isTypeLocked()) {
+       ct = param->getType();
+@@ -812,7 +812,7 @@
+   fc = op->getParent()->getFuncdata()->getCallSpecs(op);
+   if (fc == (const FuncCallSpecs *)0)
+     return TypeOp::getInputLocal(op,slot);
+-  ProtoParameter *param = fc->getParam(slot-1);
++  ProtoParameter *param = fc->getInputParameter(slot);
+   if (param != (ProtoParameter *)0) {
+     if (param->isTypeLocked()) {
+       ct = param->getType();
+diff --git a/src/unittests/testsegmented.cc b/src/unittests/testsegmented.cc
+--- a/src/unittests/testsegmented.cc
++++ b/src/unittests/testsegmented.cc
+@@ -3430,4 +3430,199 @@
+   checkPackedVariadicCall(true);
+ }
+
++static FuncCallSpecs *checkModelHoleCaller(SegmentedEnvironment &env,Funcdata *callee,bool observed) {
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  AddrSpace *stack = env.arch->getStackSpace();
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*env.fd);
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++  PcodeOp *call = spec->getOp();
++  ASSERT_EQUALS(call->getAddr(),Address(ram,0x1018));
++  ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++  ASSERT_EQUALS(spec->getFuncdata(),callee);
++  ASSERT(!spec->isInputLocked());
++  ASSERT(!spec->isInputActive());
++  ASSERT(!env.fd->hasRestartPending());
++  ASSERT_EQUALS(spec->hasStorageInputs(),observed);
++  ASSERT_EQUALS(call->numInput(),observed ? 2 : 1);
++  ASSERT(hasInputStorage(spec->getUnresolvedInputStorages(),Address(stack,4),4));
++  ASSERT(spec->getInputStorage(0) == (const VarnodeData *)0);
++  ASSERT(spec->getInputStorage(2) == (const VarnodeData *)0);
++  if (observed) {
++    const VarnodeData *storage = spec->getInputStorage(1);
++    ASSERT(storage != (const VarnodeData *)0);
++    ASSERT_EQUALS(storage->getAddr(),Address(stack,8));
++    ASSERT_EQUALS(storage->size,4);
++    ASSERT_EQUALS(call->getIn(1)->getSize(),storage->size);
++    ASSERT(call->getIn(1)->isConstant());
++    ASSERT_EQUALS(call->getIn(1)->getOffset(),7);
++    ASSERT(spec->getInputParameter(1) == (ProtoParameter *)0);
++    ASSERT_EQUALS(spec->getActiveInput()->getNumTrials(),0);
++    ASSERT_EQUALS(spec->getInputBytesConsumed(1),0);
++    ASSERT(!spec->setInputBytesConsumed(1,1));
++  }
++  bool storedSeven = false;
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->code() != CPUI_STORE) continue;
++    Varnode *value = op->getIn(2);
++    if (value->isConstant() && value->getSize() == 4 && value->getOffset() == 7) {
++      ASSERT_EQUALS(op->getAddr(),Address(ram,0x1010));
++      storedSeven = true;
++    }
++  }
++  ASSERT(storedSeven);
++  ostringstream output;
++  env.arch->print->setOutputStream(&output);
++  env.arch->print->docFunction(env.fd);
++  const string notation = "__call_incomplete(stack_argument_consumer,__input_storage(\"stack\",0x8,4,7))";
++  string compact;
++  for(char c : output.str()) {
++    if (!isspace((unsigned char)c)) compact += c;
++  }
++  ASSERT(compact.find("Incompletecallinputrecovery") != string::npos);
++  ASSERT(compact.find("stack[0x4:4]") != string::npos);
++  ASSERT_EQUALS(compact.find(notation) != string::npos,observed);
++  ASSERT_EQUALS(compact.find("stack_argument_consumer()") != string::npos,!observed);
++  output.str("");
++  env.arch->print->setMarkup(true);
++  env.arch->print->setPackedOutput(false);
++  env.arch->print->docFunction(env.fd);
++  istringstream xml(output.str());
++  DocumentStorage documents;
++  Document *doc = documents.parseDocument(xml);
++  vector<const Element *> pending(1,doc->getRoot());
++  bool operatorToken = false;
++  bool valueToken = false;
++  bool targetToken = false;
++  while(!pending.empty()) {
++    const Element *element = pending.back();
++    pending.pop_back();
++    if (element->getName() == "op" && element->getContent() == "__call_incomplete") {
++      ASSERT_EQUALS(std::stoull(element->getAttributeValue("opref"),(size_t *)0,0),call->getTime());
++      operatorToken = true;
++    }
++    if (observed && element->getName() == "variable" && element->getContent() == "7") {
++      if (std::stoull(element->getAttributeValue("varref"),(size_t *)0,0) == call->getIn(1)->getCreateIndex())
++        valueToken = true;
++    }
++    if (element->getName() == "funcname" && element->getContent() == "stack_argument_consumer") {
++      ASSERT_EQUALS(std::stoull(element->getAttributeValue("opref"),(size_t *)0,0),call->getTime());
++      targetToken = true;
++    }
++    const List &children(element->getChildren());
++    for(List::const_reverse_iterator iter=children.rbegin();iter!=children.rend();++iter)
++      pending.push_back(*iter);
++  }
++  ASSERT_EQUALS(operatorToken,observed);
++  ASSERT_EQUALS(valueToken,observed);
++  ASSERT(targetToken);
++  env.arch->print->setMarkup(false);
++  env.arch->print->setOutputStream((ostream *)0);
++  return spec;
++}
++
++TEST(segmented_model_hole_storage_inputs) {
++  // Exact 72-byte saved-frame witness; the separate reused-cell case calls at 0x1010.
++  const string bytes = "5589e583e4f083ec10892c2490909090c744240407000000e8230000008b6c240089ec5dc30000000000000000000000000000000000000000000000000000008b44240883c003c3";
++  ASSERT_EQUALS(bytes.size(),144);
++  SegmentedEnvironment env(false,"x86:LE:32:default:gcc",bytes);
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  AddrSpace *stack = env.arch->getStackSpace();
++  Funcdata *callee = env.arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1040),"stack_argument_consumer")->getFunction();
++  callee->getFuncProto().setModel(env.arch->defaultfp);
++  ASSERT(callee->getObservedInputStorages().empty());
++  checkModelHoleCaller(env,callee,false);
++  env.arch->clearAnalysis(env.fd);
++  ASSERT_EQUALS(env.fd->numCalls(),0);
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*callee);
++  ASSERT(root->perform(*callee) >= 0);
++  ASSERT(!callee->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(callee->getObservedInputStorages().size(),1);
++  ASSERT(hasInputStorage(callee->getObservedInputStorages(),Address(stack,8),4));
++  ASSERT(!hasInputStorage(callee->getObservedInputStorages(),Address(stack,4),4));
++  Varnode *input = callee->findVarnodeInput(4,Address(stack,8));
++  ASSERT(input != (Varnode *)0);
++  bool consumed = false;
++  for(PcodeOpTree::const_iterator iter=callee->beginOpAll();iter!=callee->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->code() != CPUI_RETURN || op->numInput() != 2) continue;
++    Varnode *returned = op->getIn(1);
++    while(returned->isWritten() && (returned->getDef()->code() == CPUI_COPY || returned->getDef()->code() == CPUI_CAST))
++      returned = returned->getDef()->getIn(0);
++    ASSERT(returned->isWritten());
++    PcodeOp *add = returned->getDef();
++    ASSERT_EQUALS(add->code(),CPUI_INT_ADD);
++    ASSERT(tasm31DependsOn(add->getIn(0),input));
++    ASSERT(add->getIn(1)->isConstant());
++    ASSERT_EQUALS(add->getIn(1)->getOffset(),3);
++    consumed = true;
++  }
++  ASSERT(consumed);
++  FuncCallSpecs *spec = checkModelHoleCaller(env,callee,true);
++  env.arch->clearAnalysis(env.fd);
++  ASSERT_EQUALS(env.fd->numCalls(),0);
++  ASSERT(env.arch->commentdb->beginComment(env.fd->getAddress()) == env.arch->commentdb->endComment(env.fd->getAddress()));
++  spec = checkModelHoleCaller(env,callee,true);
++  env.arch->clearAnalysis(callee);
++  ASSERT(callee->getObservedInputStorages().empty());
++  env.arch->clearAnalysis(env.fd);
++  checkModelHoleCaller(env,callee,false);
++  env.arch->clearAnalysis(env.fd);
++  root->reset(*callee);
++  ASSERT(root->perform(*callee) >= 0);
++  spec = checkModelHoleCaller(env,callee,true);
++  PcodeOp *call = spec->getOp();
++  PcodeOp *copy = env.fd->cloneOp(call,SeqNum(call->getAddr(),0xf000));
++  env.fd->opInsertBefore(copy,call);
++  unique_ptr<FuncCallSpecs> clone(spec->clone(copy));
++  Varnode *oldTarget = copy->getIn(0);
++  Varnode *target = env.fd->newVarnodeCallSpecs(clone.get());
++  env.fd->opSetInput(copy,target,0);
++  env.fd->deleteVarnode(oldTarget);
++  ASSERT(clone->hasStorageInputs());
++  ASSERT_EQUALS(clone->getInputStorage(1)->getAddr(),Address(stack,8));
++  ASSERT_EQUALS(clone->getInputStorage(1)->size,4);
++  ASSERT(copy->getIn(1) != call->getIn(1));
++  env.fd->opSetInput(copy,env.fd->newConstant(4,17),1);
++  ASSERT_EQUALS(clone->getOp()->getIn(1)->getOffset(),17);
++  ASSERT_EQUALS(call->getIn(1)->getOffset(),7);
++  // An explicit storage contract replaces inferred mapping; a missing first storage still requests restart.
++  FuncProto contract;
++  contract.setInternal(env.arch->defaultfp,env.arch->types->getTypeVoid());
++  ParameterPieces parameter;
++  parameter.addr = Address(stack,8);
++  parameter.type = env.arch->types->getBase(4,TYPE_UINT);
++  parameter.flags = ParameterPieces::typelock;
++  contract.setParam(0,"supplied",parameter);
++  contract.setInputLock(true);
++  clone->forceSet(*env.fd,contract);
++  ASSERT(!env.fd->hasRestartPending());
++  ASSERT(!clone->hasStorageInputs());
++  ASSERT(clone->isInputLocked());
++  ASSERT_EQUALS(clone->getInputParameter(1)->getAddress(),Address(stack,8));
++  ASSERT_EQUALS(copy->getIn(1)->getOffset(),17);
++  ASSERT(clone->getUnresolvedInputStorages().empty());
++  parameter.addr = Address(stack,4);
++  contract.setParam(0,"missing",parameter);
++  spec->forceSet(*env.fd,contract);
++  ASSERT(env.fd->hasRestartPending());
++  ASSERT(spec->hasStorageInputs());
++  env.fd->opDestroy(copy);
++  env.fd->deleteVarnode(target);
++  env.arch->clearAnalysis(env.fd);
++  root->reset(*env.fd);
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  spec = env.fd->getCallSpecs(0);
++  ASSERT(spec->isInputLocked());
++  ASSERT(!spec->hasStorageInputs());
++  ASSERT_EQUALS(spec->getOp()->numInput(),2);
++  ASSERT_EQUALS(spec->getInputParameter(1)->getAddress(),Address(stack,4));
++  ASSERT(spec->getUnresolvedInputStorages().empty());
++}
++
+ } // End namespace ghidra
