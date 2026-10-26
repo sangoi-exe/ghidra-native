@@ -2,13 +2,30 @@
 +++ b/src/decompiler/coreaction.cc
 @@ -1897,6 +1897,8 @@
  int4 ActionActiveParam::apply(Funcdata &data)
- 
+
  {
 +  for(int4 i=0;i<data.numCalls();++i)
 +    data.getCallSpecs(i)->recoverCallRelativeInputs(data);
    int4 i;
    FuncCallSpecs *fc;
    AliasChecker aliascheck;
+@@ -5204,6 +5206,16 @@
+   for(int4 i=0;i<numcalls;++i) {
+     FuncCallSpecs *fc = data.getCallSpecs(i);
+     Funcdata *fd = fc->getFuncdata();
++    const vector<VarnodeData> &unresolved(fc->getUnresolvedInputStorages());
++    if (!unresolved.empty()) {
++      ostringstream s;
++      s << "Incomplete call input recovery: unresolved call-relative storage ";
++      for(int4 j=0;j<unresolved.size();++j) {
++        if (j != 0) s << ", ";
++        s << unresolved[j].space->getName() << "[0x" << hex << unresolved[j].offset << ":" << dec << unresolved[j].size << "]";
++      }
++      data.warning(s.str(),fc->getOp()->getAddr());
++    }
+     if (fc->hasInputErrors()) {
+       ostringstream s;
+       s << "Cannot assign parameter location for function ";
 --- a/src/decompiler/fspec.cc
 +++ b/src/decompiler/fspec.cc
 @@ -15,6 +15,7 @@
@@ -16,15 +33,13 @@
  #include "fspec.hh"
  #include "funcdata.hh"
 +#include "ruleaction.hh"
- 
+
  namespace ghidra {
- 
-@@ -4875,6 +4876,282 @@
-   data.opInsertInput(op,loadval,slot);
-   setStackPlaceholderSlot(slot);
+
+@@ -4877,6 +4878,294 @@
    loadval->setSpacebasePlaceholder();
-+}
-+
+ }
+
 +/// Strip only width-preserving constant displacements; nonlinear definitions remain opaque.
 +static Varnode *callInputPointerBase(Varnode *vn,uintb &offset)
 +
@@ -113,7 +128,7 @@
 +  }
 +}
 +
-+/// A competing read disqualifies opaque inference, without asserting contents survive the call.
++/// A caller read establishes a competing role, not whether the callee also consumes the cell.
 +static bool callInputCompetingRead(PcodeOp *store,AddrSpace *memory,PcodeOp *call,Funcdata &data)
 +
 +{
@@ -287,22 +302,84 @@
 +    int4 size = value->getSize();
 +    if (characterizeAsInputParam(addr,size) != ParamEntry::contains_justified || activeinput.whichTrial(addr,size) >= 0)
 +      continue;
++    if (value->isFree() && !value->isConstant()) continue;
++    if (callInputCompetingRead(store,memory,op,data)) {
++      VarnodeData storage;
++      storage.space = stack;
++      storage.offset = addr.getOffset();
++      storage.size = size;
++      bool observed = false;
++      if (fd != (Funcdata *)0) {
++        const vector<VarnodeData> &inputs(fd->getObservedInputStorages());
++        observed = find(inputs.begin(),inputs.end(),storage) != inputs.end();
++      }
++      if (!observed) {
++        // Keep the uncertainty without creating a speculative CALL operand or a NoUse trial.
++        if (find(unresolvedInputStorages.begin(),unresolvedInputStorages.end(),storage) == unresolvedInputStorages.end())
++          unresolvedInputStorages.push_back(storage);
++        continue;
++      }
++    }
 +    if (value->isConstant())
 +      value = data.newConstant(size,value->getOffset());
-+    else if (value->isFree())
-+      continue;
 +    activeinput.registerTrial(addr,size);
-+    ParamTrial &trial(activeinput.getTrial(activeinput.getNumTrials()-1));
-+    if (callInputCompetingRead(store,memory,op,data))
-+      trial.markNoUse();
-+    else
-+      trial.markActive();
++    activeinput.getTrial(activeinput.getNumTrials()-1).markActive();
 +    data.opInsertInput(op,value,op->numInput());
 +  }
- }
- 
++}
++
  /// \brief Calculate the stack offset of \b this call site
-@@ -5733,10 +6010,14 @@
+ ///
+ /// The given Varnode must be the input to the CALL in the \e placeholder slot
+@@ -4991,6 +5280,7 @@
+   res->effective_extrapop = effective_extrapop;
+   res->stackoffset = stackoffset;
+   res->paramshift = paramshift;
++  res->unresolvedInputStorages = unresolvedInputStorages;
+   // We are skipping activeinput, activeoutput
+   res->isbadjumptable = isbadjumptable;
+   res->copy(*this);		// Copy the FuncProto portion
+@@ -5188,6 +5478,7 @@
+     ProtoParameter *param = getParam(i);
+     Varnode *vn = buildParam(data,newinput[1+i],param,stackref);
+     newinput[1+i] = vn;
++    resolveInputStorage(param->getAddress(),param->getSize());
+     activeinput.registerTrial(param->getAddress(),param->getSize());
+     activeinput.getTrial(i).markActive(); // Parameter is not optional
+     AddrSpace *paramSpace = param->getAddress().getSpace();
+@@ -5204,8 +5495,11 @@
+     setStackPlaceholderSlot(newinput.size()-1);
+   }
+   data.opSetAllInput(op,newinput);
+-  if (!isDotdotdot())		// Unless we are looking for varargs
++  if (!isDotdotdot()) {
++    // A supplied fixed list supersedes inferred uncertainty; a varargs prefix does not close its tail.
++    unresolvedInputStorages.clear();
+     clearActiveInput();		// turn off parameter recovery (we are locked and have all our varnodes)
++  }
+   else {
+     if (numPasses > 0)
+       activeinput.finishPass();		// Don't totally reset the pass counter
+@@ -5699,6 +5993,18 @@
+   }
+ }
+
++/// Only a selected input covering the whole cell resolves it; an intersection leaves uncertainty.
++void FuncCallSpecs::resolveInputStorage(const Address &addr,int4 size)
++
++{
++  for(vector<VarnodeData>::iterator iter=unresolvedInputStorages.begin();iter!=unresolvedInputStorages.end();) {
++    if (addr.justifiedContain(size,iter->getAddr(),iter->size,false) >= 0)
++      iter = unresolvedInputStorages.erase(iter);
++    else
++      ++iter;
++  }
++}
++
+ /// \brief Set the final input Varnodes to \b this CALL based on ParamActive analysis
+ ///
+ /// Varnodes that don't look like parameters are removed. Parameters that are unreferenced
+@@ -5733,10 +6039,14 @@
      off = addr.getOffset();
      if (spc->getType() == IPTR_SPACEBASE) {
        isspacebase = true;
@@ -319,9 +396,11 @@
      }
      else {
        vn = op->getIn(paramtrial.getSlot()); // Where parameter is currently
-@@ -5756,7 +6037,7 @@
+@@ -5755,8 +6065,9 @@
+       }
      }
      newparam.push_back(vn);
++    resolveInputStorage(addr,sz);
      // Mark the stack range used to pass this parameter as unmapped
 -    if (isspacebase)
 +    if (isspacebase && stackoffset != offset_unknown)
@@ -330,20 +409,84 @@
    data.opSetAllInput(op,newparam); // Set final parameter list
 --- a/src/decompiler/fspec.hh
 +++ b/src/decompiler/fspec.hh
-@@ -1716,6 +1716,7 @@
+@@ -1656,6 +1656,7 @@
+   int4 stackPlaceholderSlot;	///< Slot containing temporary stack tracing placeholder (-1 means unused)
+   int4 paramshift;		///< Number of input parameters to ignore before prototype
+   int4 matchCallCount;		///< Number of calls to this sub-function within the calling function
++  vector<VarnodeData> unresolvedInputStorages;	///< Competing-role call-relative cells, independent of disposable trials
+   ParamActive activeinput;	///< Info for recovering input parameters
+   ParamActive activeoutput;	///< Info for recovering output parameters
+   mutable vector<int4> inputConsume;	///< Number of bytes consumed by sub-function, for each input parameter
+@@ -1663,6 +1664,7 @@
+   bool isoutputactive;		///< Are we actively trying to recover output parameters
+   bool isbadjumptable;		///< Was the call originally a jump-table we couldn't recover
+   bool isstackoutputlock;	///< Do we have a locked output on the stack
++  void resolveInputStorage(const Address &addr,int4 size);	///< Reconcile a whole unresolved cell with a selected input
+   Varnode *getSpacebaseRelative(void) const;	///< Get the active stack-pointer Varnode at \b this call site
+   Varnode *buildParam(Funcdata &data,Varnode *vn,ProtoParameter *param,Varnode *stackref);
+   int4 transferLockedInputParam(ProtoParameter *param);
+@@ -1716,6 +1718,8 @@
    void forceSet(Funcdata &data,const FuncProto &fp);
    void insertPcode(Funcdata &data);
    void createPlaceholder(Funcdata &data,AddrSpace *spacebase);
 +  void recoverCallRelativeInputs(Funcdata &data);
++  const vector<VarnodeData> &getUnresolvedInputStorages(void) const { return unresolvedInputStorages; }	///< Get unresolved call-relative locations, not definite arguments
    void resolveSpacebaseRelative(Funcdata &data,Varnode *phvn);
    void abortSpacebaseRelative(Funcdata &data);
    void finalInputCheck(void);
+--- a/src/decompiler/funcdata.cc
++++ b/src/decompiler/funcdata.cc
+@@ -95,6 +95,7 @@
+   localmap->clearUnlocked();	// Clear non-permanent stuff
+   localmap->resetLocalWindow();
+
++  observedInputStorages.clear();
+   clearActiveOutput();
+   funcp.clearUnlockedOutput();	// Inputs are cleared by localmap
+   unionMap.clear();
+@@ -172,6 +173,18 @@
+ {
+   flags |= processing_complete;
+   obank.destroyDead();		// Free up anything in the dead list
++  observedInputStorages.clear();
++  // Model-filled holes are not evidence: require an exact real input with a surviving use.
++  for(int4 i=0;i<funcp.numParams();++i) {
++    ProtoParameter *param = funcp.getParam(i);
++    Varnode *vn = findVarnodeInput(param->getSize(),param->getAddress());
++    if (vn == (Varnode *)0 || vn->hasNoDescend()) continue;
++    VarnodeData storage;
++    storage.space = vn->getSpace();
++    storage.offset = vn->getOffset();
++    storage.size = vn->getSize();
++    observedInputStorages.push_back(storage);
++  }
+ #ifdef CPUI_STATISTICS
+   glb->stats->process(*this);
+ #endif
+--- a/src/decompiler/funcdata.hh
++++ b/src/decompiler/funcdata.hh
+@@ -86,6 +86,7 @@
+   FuncProto funcp;		///< Prototype of this function
+   ScopeLocal *localmap;		///< Local variables (symbols in the function scope)
+
++  vector<VarnodeData> observedInputStorages;	///< Positive input-use snapshot from completed analysis, not complete arity
+   vector<FuncCallSpecs *> qlst;	///< List of calls this function makes
+   vector<JumpTable *> jumpvec;	///< List of jump-tables for this function
+
+@@ -173,6 +174,7 @@
+   void warningHeader(const string &txt) const;			///< Add a warning comment as part of the function header
+   void startProcessing(void);					///< Start processing for this function
+   void stopProcessing(void);					///< Mark that processing has completed for this function
++  const vector<VarnodeData> &getObservedInputStorages(void) const { return observedInputStorages; }	///< Get the current completed input-use snapshot
+   bool startTypeRecovery(void);					///< Mark that data-type analysis has started
+
+   /// \brief Toggle whether data-type recovery will be performed on \b this function
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -2577,4 +2577,228 @@
+@@ -2577,4 +2577,464 @@
    ASSERT_EQUALS(PcodeOp::getOpFromConst(second->getIn(1)->getAddr()),fc->getOp());
  }
- 
+
 +TEST(segmented_opaque_saved_stack_not_arguments) {
 +  string bytes = "8d4c240483e4f0ff71fc5589e55183ec04c7042480100000e8230000008d65fc595d8d61fcc3";
 +  bytes.resize(0x40*2,'0');
@@ -364,30 +507,11 @@
 +  ASSERT_EQUALS(callee->getFuncProto().numParams(),0);
 +  ASSERT(!env.fd->getFuncProto().isInputLocked());
 +  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*callee);
++  ASSERT(root->perform(*callee) >= 0);
++  ASSERT_EQUALS(callee->getObservedInputStorages().size(),1);
++  ASSERT_EQUALS(callee->getObservedInputStorages()[0].getAddr(),Address(env.arch->getStackSpace(),4));
 +  root->reset(*env.fd);
-+  ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
-+  bool excluded = false;
-+  int4 result = root->perform(*env.fd);
-+  while(result == -1) {
-+    ASSERT_EQUALS(env.fd->numCalls(),1);
-+    FuncCallSpecs *call = env.fd->getCallSpecs(0);
-+    ParamActive *active = call->getActiveInput();
-+    int4 index = active->whichTrial(Address(env.arch->getStackSpace(),8),4);
-+    if (index >= 0 && active->getTrial(index).isDefinitelyNotUsed()) {
-+      const ParamTrial &trial(active->getTrial(index));
-+      ASSERT(trial.isChecked());
-+      ASSERT(!trial.isActive());
-+      ASSERT(!trial.isUsed());
-+      ASSERT(call->isInputActive());
-+      ASSERT(!active->isFullyChecked());
-+      ASSERT_EQUALS(call->getSpacebaseOffset(),FuncCallSpecs::offset_unknown);
-+      excluded = true;
-+      break;
-+    }
-+    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
-+    result = root->perform(*env.fd);
-+  }
-+  ASSERT(excluded);
 +  ASSERT(root->perform(*env.fd) >= 0);
 +  ASSERT_EQUALS(env.fd->numCalls(),1);
 +  FuncCallSpecs *call = env.fd->getCallSpecs(0);
@@ -416,7 +540,15 @@
 +  }
 +  ASSERT(alignment);
 +  ASSERT(!callee->getFuncProto().isInputLocked());
-+  ASSERT_EQUALS(callee->getFuncProto().numParams(),0);
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),1);
++  ASSERT(!call->isInputActive());
++  const vector<VarnodeData> &unresolved(call->getUnresolvedInputStorages());
++  bool savedCell = false;
++  for(int4 i=0;i<unresolved.size();++i) {
++    if (unresolved[i].getAddr() == Address(env.arch->getStackSpace(),8) && unresolved[i].size == 4)
++      savedCell = true;
++  }
++  ASSERT(savedCell);
 +}
 +
 +static void checkOpaqueCellContinuations(bool interblock,bool overwrite) {
@@ -480,52 +612,36 @@
 +    return result;
 +  };
 +  Action *root = env.arch->allacts.getCurrent();
-+  root->reset(*env.fd);
-+  ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
-+  int4 result = root->perform(*env.fd);
-+  bool captured = false;
-+  bool graphChecked = false;
-+  ostringstream earlyState;
-+  while(result == -1) {
-+    vector<FuncCallSpecs *> current(calls());
-+    if (!graphChecked) {
-+      if (interblock && !overwrite) {
-+        BlockBasic *branch = current[0]->getOp()->getParent();
-+        ASSERT_EQUALS(branch->sizeOut(),2);
-+        ASSERT_EQUALS(branch->getFalseOut()->getStart(),Address(ram,0x1021));
-+        ASSERT_EQUALS(branch->getTrueOut()->getStart(),Address(ram,0x1024));
-+        ASSERT_EQUALS(branch->getFalseOut()->sizeOut(),1);
-+        ASSERT_EQUALS(branch->getFalseOut()->getOut(0),branch->getTrueOut());
-+        ASSERT_EQUALS(branch->getTrueOut()->sizeIn(),2);
-+      }
-+      env.fd->printRaw(earlyState);
-+      graphChecked = true;
-+    }
-+    ParamActive *active = current[0]->getActiveInput();
-+    int4 index = active->whichTrial(Address(env.arch->getStackSpace(),8),4);
-+    if (index >= 0 && current[0]->isInputActive() && !active->isFullyChecked()) {
-+      const ParamTrial &trial(active->getTrial(index));
-+      if (trial.isDefinitelyNotUsed() != !overwrite) {
-+        cerr << std::dec << "Opaque cell: interblock=" << interblock << " overwrite=" << overwrite
-+             << " heritage=" << env.fd->getHeritagePass() << " checked=" << trial.isChecked()
-+             << " active=" << trial.isActive() << " used=" << trial.isUsed()
-+             << " no_use=" << trial.isDefinitelyNotUsed() << endl;
-+        cerr << "Initial decoded CFG:\n" << earlyState.str() << "Preselection CFG:\n";
-+        env.fd->printRaw(cerr);
-+      }
-+      ASSERT(trial.isChecked());
-+      ASSERT(!trial.isUsed());
-+      ASSERT_EQUALS(trial.isDefinitelyNotUsed(),!overwrite);
-+      ASSERT_EQUALS(trial.isActive(),overwrite);
-+      captured = true;
-+      break;
-+    }
-+    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
-+    result = root->perform(*env.fd);
++  for(int4 i=0;i<callees.size();++i) {
++    root->reset(*callees[i]);
++    ASSERT(root->perform(*callees[i]) >= 0);
++    ASSERT_EQUALS(callees[i]->getObservedInputStorages().size(),1);
++    ASSERT_EQUALS(callees[i]->getObservedInputStorages()[0].getAddr(),Address(env.arch->getStackSpace(),4));
 +  }
-+  ASSERT(captured);
++  root->reset(*env.fd);
++  if (interblock && !overwrite) {
++    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
++    ASSERT_EQUALS(root->perform(*env.fd),-1);
++    BlockBasic *branch = calls()[0]->getOp()->getParent();
++    ASSERT_EQUALS(branch->sizeOut(),2);
++    ASSERT_EQUALS(branch->getFalseOut()->getStart(),Address(ram,0x1021));
++    ASSERT_EQUALS(branch->getTrueOut()->getStart(),Address(ram,0x1024));
++    ASSERT_EQUALS(branch->getFalseOut()->sizeOut(),1);
++    ASSERT_EQUALS(branch->getFalseOut()->getOut(0),branch->getTrueOut());
++    ASSERT_EQUALS(branch->getTrueOut()->sizeIn(),2);
++  }
 +  ASSERT(root->perform(*env.fd) >= 0);
 +  vector<FuncCallSpecs *> finalCalls(calls());
++  for(int4 i=0;i<finalCalls.size();++i) {
++    ASSERT(!finalCalls[i]->isInputActive());
++    const vector<VarnodeData> &unresolved(finalCalls[i]->getUnresolvedInputStorages());
++    bool savedCell = false;
++    for(int4 j=0;j<unresolved.size();++j) {
++      if (unresolved[j].getAddr() == Address(env.arch->getStackSpace(),8) && unresolved[j].size == 4)
++        savedCell = true;
++    }
++    if (i == 0) ASSERT_EQUALS(savedCell,!overwrite);
++  }
 +  if (!overwrite) {
 +    for(int4 i=0;i<finalCalls.size();++i) {
 +      ASSERT_EQUALS(finalCalls[i]->getOp()->numInput(),2);
@@ -552,7 +668,7 @@
 +  ASSERT(!env.fd->getFuncProto().isInputLocked());
 +  for(int4 i=0;i<callees.size();++i) {
 +    ASSERT(!callees[i]->getFuncProto().isInputLocked());
-+    ASSERT_EQUALS(callees[i]->getFuncProto().numParams(),0);
++    ASSERT_EQUALS(callees[i]->getFuncProto().numParams(),1);
 +  }
 +}
 +
@@ -566,6 +682,269 @@
 +
 +TEST(segmented_opaque_overwritten_cell_not_excluded) {
 +  checkOpaqueCellContinuations(true,true);
++}
++
++static bool hasInputStorage(const vector<VarnodeData> &storages,const Address &addr,int4 size) {
++  for(int4 i=0;i<storages.size();++i) {
++    if (storages[i].getAddr() == addr && storages[i].size == size) return true;
++  }
++  return false;
++}
++
++static void checkIncompleteCallWarning(SegmentedEnvironment &env,FuncCallSpecs *spec,bool expected) {
++  bool found = false;
++  CommentDatabase *comments = env.arch->commentdb;
++  for(CommentSet::const_iterator iter=comments->beginComment(env.fd->getAddress());iter!=comments->endComment(env.fd->getAddress());++iter) {
++    const Comment *comment = *iter;
++    if (comment->getText().find("Incomplete call input recovery") == string::npos) continue;
++    ASSERT_EQUALS(comment->getType(),Comment::warning);
++    ASSERT_EQUALS(comment->getAddr(),spec->getOp()->getAddr());
++    ASSERT(comment->getText().find("stack[0x4:4]") != string::npos);
++    found = true;
++  }
++  ASSERT_EQUALS(found,expected);
++  ostringstream output;
++  env.arch->print->setOutputStream(&output);
++  env.arch->print->docFunction(env.fd);
++  ASSERT_EQUALS(output.str().find("Incomplete call input recovery") != string::npos,expected);
++  ASSERT(output.str().find(expected ? "reuse_callee()" : "reuse_callee(7)") != string::npos);
++  output.str("");
++  env.arch->print->setMarkup(true);
++  env.arch->print->setPackedOutput(false);
++  env.arch->print->docFunction(env.fd);
++  istringstream xml(output.str());
++  DocumentStorage storage;
++  Document *doc = storage.parseDocument(xml);
++  vector<const Element *> pending(1,doc->getRoot());
++  string commentText;
++  while(!pending.empty()) {
++    const Element *element = pending.back();
++    pending.pop_back();
++    if (element->getName() == "comment") {
++      commentText += element->getContent();
++      commentText += ' ';
++    }
++    const List &children(element->getChildren());
++    for(List::const_reverse_iterator iter=children.rbegin();iter!=children.rend();++iter)
++      pending.push_back(*iter);
++  }
++  ASSERT_EQUALS(commentText.find("Incomplete call input recovery") != string::npos,expected);
++  if (expected) ASSERT(commentText.find("stack[0x4:4]") != string::npos);
++  env.arch->print->setMarkup(false);
++  env.arch->print->setOutputStream((ostream *)0);
++}
++
++static void checkReusedCellCaller(SegmentedEnvironment &env,Funcdata *callee,bool observed) {
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  AddrSpace *stack = env.arch->getStackSpace();
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*env.fd);
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++  PcodeOp *call = spec->getOp();
++  ASSERT_EQUALS(call->getAddr(),Address(ram,0x1010));
++  ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++  ASSERT_EQUALS(spec->getSpacebaseOffset(),FuncCallSpecs::offset_unknown);
++  ASSERT(!spec->isInputLocked());
++  ASSERT(!env.fd->getFuncProto().isInputLocked());
++  ASSERT(!spec->isInputActive());
++  ASSERT_EQUALS(call->numInput(),observed ? 2 : 1);
++  if (observed) {
++    ASSERT(call->getIn(1)->isConstant());
++    ASSERT_EQUALS(call->getIn(1)->getSize(),4);
++    ASSERT_EQUALS(call->getIn(1)->getOffset(),7);
++    ASSERT(spec->getUnresolvedInputStorages().empty());
++  }
++  else {
++    ASSERT(hasInputStorage(spec->getUnresolvedInputStorages(),Address(stack,4),4));
++    ASSERT_EQUALS(spec->getActiveInput()->whichTrial(Address(stack,4),4),-1);
++    PcodeOp *selected = env.fd->newOp(2,call->getAddr());
++    env.fd->opSetOpcode(selected,CPUI_CALL);
++    Varnode *target = env.fd->newVarnodeCallSpecs(spec);
++    env.fd->opSetInput(selected,target,0);
++    env.fd->opSetInput(selected,env.fd->newConstant(2,7),1);
++    env.fd->opInsertBefore(selected,call);
++    unique_ptr<FuncCallSpecs> clone(spec->clone(selected));
++    Varnode *annotation = env.fd->newVarnodeCallSpecs(clone.get());
++    env.fd->opSetInput(selected,annotation,0);
++    env.fd->deleteVarnode(target);
++    ASSERT(hasInputStorage(clone->getUnresolvedInputStorages(),Address(stack,4),4));
++    // Controlled finalizer inputs: a partial overlap must not erase the original unresolved cell.
++    ParamActive *active = clone->getActiveInput();
++    active->registerTrial(Address(stack,4),2);
++    active->getTrial(0).markUsed();
++    clone->buildInputFromTrials(*env.fd);
++    ASSERT(hasInputStorage(clone->getUnresolvedInputStorages(),Address(stack,4),4));
++    active->clear();
++    active->registerTrial(Address(stack,4),4);
++    active->getTrial(0).markUsed();
++    env.fd->opSetInput(selected,env.fd->newConstant(4,7),1);
++    clone->buildInputFromTrials(*env.fd);
++    ASSERT(clone->getUnresolvedInputStorages().empty());
++    env.fd->opDestroy(selected);
++    env.fd->deleteVarnode(annotation);
++  }
++  Varnode *returned = (Varnode *)0;
++  Varnode *laterRead = (Varnode *)0;
++  bool alignment = false;
++  Varnode *entry = env.fd->findVarnodeInput(4,env.arch->translate->getRegister("ESP").getAddr());
++  ASSERT(entry != (Varnode *)0);
++  for(PcodeOpTree::const_iterator iter=env.fd->beginOpAll();iter!=env.fd->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead()) continue;
++    if (op->code() == CPUI_RETURN && op->numInput() == 2) returned = op->getIn(1);
++    if (op->code() == CPUI_LOAD && op->getAddr() == Address(ram,0x1015)) laterRead = op->getOut();
++    if (op->code() == CPUI_INT_AND && op->getIn(1)->isConstant() && op->getIn(1)->getOffset() == 0xfffffff0)
++      alignment = alignment || tasm31DependsOn(op->getIn(0),entry);
++  }
++  ASSERT(alignment);
++  ASSERT(returned != (Varnode *)0);
++  ASSERT_EQUALS(returned->getSize(),4);
++  ASSERT(call->getOut() != (Varnode *)0);
++  ASSERT(laterRead != (Varnode *)0);
++  ASSERT(tasm31DependsOn(returned,call->getOut()));
++  ASSERT(tasm31DependsOn(returned,laterRead));
++  checkIncompleteCallWarning(env,spec,!observed);
++}
++
++static void checkReusedCellInput(bool analyzeFirst) {
++  // Exact 72-byte supplied witness. CALL is 0x1010, and the callee reads entry-stack+4 before adding 3.
++  SegmentedEnvironment env(false,"x86:LE:32:default:gcc","5589e583e4f083ec10c7042407000000e82b00000003042489ec5dc30000000000000000000000000000000000000000000000000000000000000000000000008b44240483c003c3");
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  AddrSpace *stack = env.arch->getStackSpace();
++  Funcdata *callee = env.arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1040),"reuse_callee")->getFunction();
++  callee->getFuncProto().setModel(env.arch->defaultfp);
++  ASSERT(!callee->getFuncProto().isInputLocked());
++  ASSERT(!env.fd->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),0);
++  ASSERT(callee->getObservedInputStorages().empty());
++  if (!analyzeFirst) {
++    checkReusedCellCaller(env,callee,false);
++    env.arch->clearAnalysis(env.fd);
++  }
++  Action *root = env.arch->allacts.getCurrent();
++  ASSERT_EQUALS(env.arch->allacts.getCurrentName(),"decompile");
++  root->reset(*callee);
++  ASSERT(root->perform(*callee) >= 0);
++  ASSERT(!callee->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(callee->getFuncProto().numParams(),1);
++  ASSERT_EQUALS(callee->getObservedInputStorages().size(),1);
++  ASSERT(hasInputStorage(callee->getObservedInputStorages(),Address(stack,4),4));
++  Varnode *input = callee->findVarnodeInput(4,Address(stack,4));
++  ASSERT(input != (Varnode *)0);
++  ASSERT(!input->hasNoDescend());
++  bool consumed = false;
++  for(PcodeOpTree::const_iterator iter=callee->beginOpAll();iter!=callee->endOpAll();++iter) {
++    PcodeOp *op = (*iter).second;
++    if (op->isDead() || op->code() != CPUI_RETURN || op->numInput() != 2) continue;
++    Varnode *returned = op->getIn(1);
++    while(returned->isWritten() && (returned->getDef()->code() == CPUI_COPY || returned->getDef()->code() == CPUI_CAST))
++      returned = returned->getDef()->getIn(0);
++    ASSERT(returned->isWritten());
++    PcodeOp *add = returned->getDef();
++    ASSERT_EQUALS(add->code(),CPUI_INT_ADD);
++    ASSERT(tasm31DependsOn(add->getIn(0),input));
++    ASSERT(add->getIn(1)->isConstant());
++    ASSERT_EQUALS(add->getIn(1)->getOffset(),3);
++    consumed = true;
++  }
++  ASSERT(consumed);
++  checkReusedCellCaller(env,callee,true);
++  env.arch->clearAnalysis(callee);
++  ASSERT(callee->getObservedInputStorages().empty());
++}
++
++TEST(segmented_reused_cell_callee_input) {
++  checkReusedCellInput(true);
++}
++
++TEST(segmented_reused_cell_unresolved) {
++  checkReusedCellInput(false);
++}
++
++TEST(segmented_observed_input_excludes_model_hole) {
++  SegmentedEnvironment env(false,"x86:LE:32:default:gcc","8b442408c3");
++  AddrSpace *stack = env.arch->getStackSpace();
++  ASSERT(env.fd->getObservedInputStorages().empty());
++  Action *root = env.arch->allacts.getCurrent();
++  root->reset(*env.fd);
++  ASSERT(root->perform(*env.fd) >= 0);
++  ASSERT(!env.fd->getFuncProto().isInputLocked());
++  ASSERT_EQUALS(env.fd->getFuncProto().numParams(),2);
++  ASSERT_EQUALS(env.fd->getObservedInputStorages().size(),1);
++  ASSERT(hasInputStorage(env.fd->getObservedInputStorages(),Address(stack,8),4));
++  ASSERT(!hasInputStorage(env.fd->getObservedInputStorages(),Address(stack,4),4));
++  env.arch->clearAnalysis(env.fd);
++  ASSERT(env.fd->getObservedInputStorages().empty());
++}
++
++TEST(segmented_opaque_late_input_contracts) {
++  for(int4 kind=0;kind<3;++kind) {
++    string bytes = "8d4c240483e4f0ff71fc5589e55183ec04c7042480100000e8230000008d65fc595d8d61fcc3";
++    bytes.resize(0x40*2,'0');
++    bytes += "8b442404c3";
++    bytes.resize(0x80*2,'0');
++    bytes += "4631320a00";
++    SegmentedEnvironment env(false,"x86:LE:32:default:gcc",bytes);
++    AddrSpace *ram = env.arch->getDefaultCodeSpace();
++    AddrSpace *stack = env.arch->getStackSpace();
++    Funcdata *callee = env.arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1040),"consume_format")->getFunction();
++    callee->getFuncProto().setModel(env.arch->defaultfp);
++    Action *root = env.arch->allacts.getCurrent();
++    root->reset(*env.fd);
++    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
++    ASSERT_EQUALS(root->perform(*env.fd),-1);
++    ASSERT_EQUALS(env.fd->numCalls(),1);
++    FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++    spec->recoverCallRelativeInputs(*env.fd);
++    ASSERT(spec->isInputActive());
++    ASSERT(hasInputStorage(spec->getUnresolvedInputStorages(),Address(stack,8),4));
++    ASSERT(!spec->isInputLocked());
++    ASSERT_EQUALS(spec->numParams(),0);
++    FuncProto contract;
++    if (kind == 0) {
++      contract.copy(*spec);
++      contract.setModelLock(true);
++    }
++    else {
++      istringstream declaration(kind == 1 ? "uint4 fixed_inputs(uint4 format);" : "uint4 open_tail(uint4 format,...);");
++      PrototypePieces pieces;
++      parse_protopieces(pieces,declaration,env.arch);
++      // A proposed contract must not edit the receiver's symbol-backed input store.
++      contract.setInternal(pieces.model,env.arch->types->getTypeVoid());
++      contract.setPieces(pieces);
++      ASSERT(contract.isInputLocked());
++      ASSERT_EQUALS(contract.isDotdotdot(),kind == 2);
++    }
++    ASSERT(!spec->isInputLocked());
++    ASSERT_EQUALS(spec->numParams(),0);
++    ASSERT(!spec->isDotdotdot());
++    ASSERT_EQUALS(callee->getFuncProto().numParams(),0);
++    if (kind == 0) {
++      vector<Varnode *> inputs,outputs;
++      ASSERT(spec->lateRestriction(contract,inputs,outputs));
++    }
++    else
++      spec->forceSet(*env.fd,contract);
++    ASSERT_EQUALS(spec->isInputLocked(),kind != 0);
++    ASSERT_EQUALS(spec->isDotdotdot(),kind == 2);
++    ASSERT(!env.fd->hasRestartPending());
++    ASSERT_EQUALS(hasInputStorage(spec->getUnresolvedInputStorages(),Address(stack,8),4),kind != 1);
++    ASSERT(root->perform(*env.fd) >= 0);
++    ASSERT_EQUALS(env.fd->numCalls(),1);
++    spec = env.fd->getCallSpecs(0);
++    ASSERT_EQUALS(hasInputStorage(spec->getUnresolvedInputStorages(),Address(stack,8),4),kind != 1);
++    bool warned = false;
++    CommentDatabase *comments = env.arch->commentdb;
++    for(CommentSet::const_iterator iter=comments->beginComment(env.fd->getAddress());iter!=comments->endComment(env.fd->getAddress());++iter) {
++      if ((*iter)->getText().find("Incomplete call input recovery") != string::npos) {
++        ASSERT_EQUALS((*iter)->getAddr(),spec->getOp()->getAddr());
++        warned = true;
++      }
++    }
++    ASSERT_EQUALS(warned,kind != 1);
++  }
 +}
 +
  } // End namespace ghidra
