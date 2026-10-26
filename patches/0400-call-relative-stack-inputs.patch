@@ -280,7 +280,7 @@
 +      }
 +    }
 +  }
-+  if (!isInputActive() || isInputLocked()) return;
++  if (!isInputActive() || (isInputLocked() && !isDotdotdot())) return;
 +  Varnode *pointer = getSpacebaseRelative();
 +  if (pointer == (Varnode *)0) return;
 +  PcodeOp *placeholder = op->getIn(stackPlaceholderSlot)->getDef();
@@ -339,7 +339,17 @@
    // We are skipping activeinput, activeoutput
    res->isbadjumptable = isbadjumptable;
    res->copy(*this);		// Copy the FuncProto portion
-@@ -5188,6 +5478,7 @@
+@@ -5178,7 +5468,8 @@
+   Varnode *placeholder = (Varnode *)0;
+   if (stackPlaceholderSlot>=0)
+     placeholder = op->getIn(stackPlaceholderSlot);
+-  bool noplacehold = true;
++  // A variadic tail needs the dedicated call-SP reference, not a forwarded fixed input.
++  bool noplacehold = !isDotdotdot() || placeholder == (Varnode *)0;
+
+   // Clear activeinput and old placeholder
+   stackPlaceholderSlot = -1;
+@@ -5188,6 +5479,7 @@
      ProtoParameter *param = getParam(i);
      Varnode *vn = buildParam(data,newinput[1+i],param,stackref);
      newinput[1+i] = vn;
@@ -347,7 +357,7 @@
      activeinput.registerTrial(param->getAddress(),param->getSize());
      activeinput.getTrial(i).markActive(); // Parameter is not optional
      AddrSpace *paramSpace = param->getAddress().getSpace();
-@@ -5204,8 +5495,11 @@
+@@ -5204,8 +5496,11 @@
      setStackPlaceholderSlot(newinput.size()-1);
    }
    data.opSetAllInput(op,newinput);
@@ -360,7 +370,7 @@
    else {
      if (numPasses > 0)
        activeinput.finishPass();		// Don't totally reset the pass counter
-@@ -5699,6 +5993,18 @@
+@@ -5699,6 +5994,18 @@
    }
  }
 
@@ -379,7 +389,7 @@
  /// \brief Set the final input Varnodes to \b this CALL based on ParamActive analysis
  ///
  /// Varnodes that don't look like parameters are removed. Parameters that are unreferenced
-@@ -5733,10 +6039,14 @@
+@@ -5733,10 +6040,14 @@
      off = addr.getOffset();
      if (spc->getType() == IPTR_SPACEBASE) {
        isspacebase = true;
@@ -396,7 +406,7 @@
      }
      else {
        vn = op->getIn(paramtrial.getSlot()); // Where parameter is currently
-@@ -5755,8 +6065,9 @@
+@@ -5755,8 +6066,9 @@
        }
      }
      newparam.push_back(vn);
@@ -483,7 +493,7 @@
    /// \brief Toggle whether data-type recovery will be performed on \b this function
 --- a/src/unittests/testsegmented.cc
 +++ b/src/unittests/testsegmented.cc
-@@ -2577,4 +2577,464 @@
+@@ -2577,4 +2577,585 @@
    ASSERT_EQUALS(PcodeOp::getOpFromConst(second->getIn(1)->getAddr()),fc->getOp());
  }
 
@@ -945,6 +955,127 @@
 +    }
 +    ASSERT_EQUALS(warned,kind != 1);
 +  }
++}
++
++static void setVariadicPrefix(SegmentedEnvironment &env,FuncProto &contract) {
++  istringstream declaration("uint4 audited_varargs(uint4 first,...);");
++  PrototypePieces pieces;
++  parse_protopieces(pieces,declaration,env.arch);
++  contract.setInternal(pieces.model,env.arch->types->getTypeVoid());
++  contract.setPieces(pieces);
++  ASSERT(contract.isInputLocked());
++  ASSERT(contract.isDotdotdot());
++  ASSERT_EQUALS(contract.numParams(),1);
++}
++
++static void checkVariadicTail(SegmentedEnvironment &env,Funcdata *callee,bool observed) {
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  AddrSpace *stack = env.arch->getStackSpace();
++  ASSERT_EQUALS(env.fd->numCalls(),1);
++  FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++  PcodeOp *call = spec->getOp();
++  ASSERT_EQUALS(call->getAddr(),Address(ram,0x1018));
++  ASSERT_EQUALS(spec->getEntryAddress(),callee->getAddress());
++  ASSERT_EQUALS(spec->getSpacebaseOffset(),FuncCallSpecs::offset_unknown);
++  ASSERT(spec->isInputLocked());
++  ASSERT(spec->isDotdotdot());
++  ASSERT_EQUALS(spec->numParams(),1);
++  ASSERT_EQUALS(spec->getParam(0)->getAddress(),Address(stack,4));
++  ASSERT_EQUALS(spec->getParam(0)->getName(),"first");
++  ASSERT_EQUALS(call->numInput(),observed ? 3 : 2);
++  ASSERT(call->getIn(1)->isConstant());
++  ASSERT_EQUALS(call->getIn(1)->getSize(),4);
++  ASSERT_EQUALS(call->getIn(1)->getOffset(),1);
++  ASSERT(!env.fd->getFuncProto().isInputLocked());
++  if (observed) {
++    ASSERT(call->getIn(2)->isConstant());
++    ASSERT_EQUALS(call->getIn(2)->getSize(),4);
++    ASSERT_EQUALS(call->getIn(2)->getOffset(),7);
++    ASSERT(spec->getUnresolvedInputStorages().empty());
++  }
++  else {
++    ASSERT_EQUALS(spec->getUnresolvedInputStorages().size(),1);
++    ASSERT(hasInputStorage(spec->getUnresolvedInputStorages(),Address(stack,8),4));
++    ASSERT_EQUALS(spec->getActiveInput()->whichTrial(Address(stack,8),4),-1);
++  }
++  bool warned = false;
++  CommentDatabase *comments = env.arch->commentdb;
++  for(CommentSet::const_iterator iter=comments->beginComment(env.fd->getAddress());iter!=comments->endComment(env.fd->getAddress());++iter) {
++    if ((*iter)->getText().find("Incomplete call input recovery") == string::npos) continue;
++    ASSERT_EQUALS((*iter)->getType(),Comment::warning);
++    ASSERT_EQUALS((*iter)->getAddr(),call->getAddr());
++    ASSERT((*iter)->getText().find("stack[0x8:4]") != string::npos);
++    warned = true;
++  }
++  ASSERT_EQUALS(warned,!observed);
++}
++
++static void checkVariadicReusedCell(bool observed,bool late) {
++  // Supplied 72-byte witness: fixed 1, reused tail 7, and a callee consuming entry-stack+8.
++  SegmentedEnvironment env(false,"x86:LE:32:default:gcc","5589e583e4f083ec10c7042401000000c744240407000000e8230000000344240489ec5dc30000000000000000000000000000000000000000000000000000008b44240883c003c3");
++  AddrSpace *ram = env.arch->getDefaultCodeSpace();
++  AddrSpace *stack = env.arch->getStackSpace();
++  Funcdata *callee = env.arch->symboltab->getGlobalScope()->addFunction(Address(ram,0x1040),"audited_varargs")->getFunction();
++  callee->getFuncProto().setModel(env.arch->defaultfp);
++  Action *root = env.arch->allacts.getCurrent();
++  if (observed) {
++    root->reset(*callee);
++    ASSERT(root->perform(*callee) >= 0);
++    ASSERT(!callee->getFuncProto().isInputLocked());
++    ASSERT_EQUALS(callee->getObservedInputStorages().size(),1);
++    ASSERT(hasInputStorage(callee->getObservedInputStorages(),Address(stack,8),4));
++    ASSERT(!hasInputStorage(callee->getObservedInputStorages(),Address(stack,4),4));
++  }
++  else
++    ASSERT(callee->getObservedInputStorages().empty());
++  if (late) {
++    root->reset(*env.fd);
++    ASSERT(root->setBreakPoint(Action::tmpbreak_start,"activeparam"));
++    ASSERT_EQUALS(root->perform(*env.fd),-1);
++    ASSERT_EQUALS(env.fd->numCalls(),1);
++    FuncCallSpecs *spec = env.fd->getCallSpecs(0);
++    ASSERT(spec->isInputActive());
++    ASSERT(!spec->isInputLocked());
++    FuncProto contract;
++    setVariadicPrefix(env,contract);
++    ASSERT(!spec->isInputLocked());
++    spec->forceSet(*env.fd,contract);
++    ASSERT(!env.fd->hasRestartPending());
++    Varnode *fixed = spec->getOp()->getIn(1);
++    spec->recoverCallRelativeInputs(*env.fd);
++    ASSERT_EQUALS(spec->getOp()->getIn(1),fixed);
++    ASSERT_EQUALS(hasInputStorage(spec->getUnresolvedInputStorages(),Address(stack,8),4),!observed);
++  }
++  else {
++    FuncProto *contract = new FuncProto();
++    setVariadicPrefix(env,*contract);
++    env.fd->getOverride().insertProtoOverride(Address(ram,0x1018),contract);
++    root->reset(*env.fd);
++  }
++  ASSERT(root->perform(*env.fd) >= 0);
++  checkVariadicTail(env,callee,observed);
++  env.arch->clearAnalysis(env.fd);
++  ASSERT_EQUALS(env.fd->numCalls(),0);
++  ASSERT(env.arch->commentdb->beginComment(env.fd->getAddress()) == env.arch->commentdb->endComment(env.fd->getAddress()));
++  root->reset(*env.fd);
++  ASSERT(root->perform(*env.fd) >= 0);
++  checkVariadicTail(env,callee,observed);
++}
++
++TEST(segmented_variadic_reused_cell_callee_input) {
++  checkVariadicReusedCell(true,false);
++}
++
++TEST(segmented_variadic_reused_cell_unresolved) {
++  checkVariadicReusedCell(false,false);
++}
++
++TEST(segmented_variadic_late_reused_cell_callee_input) {
++  checkVariadicReusedCell(true,true);
++}
++
++TEST(segmented_variadic_late_reused_cell_unresolved) {
++  checkVariadicReusedCell(false,true);
 +}
 +
  } // End namespace ghidra
