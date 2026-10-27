@@ -518,7 +518,7 @@
    int4 stackPlaceholderSlot;	///< Slot containing temporary stack tracing placeholder (-1 means unused)
    int4 paramshift;		///< Number of input parameters to ignore before prototype
    int4 matchCallCount;		///< Number of calls to this sub-function within the calling function
-+  vector<VarnodeData> unresolvedInputStorages;	///< Competing-role call-relative cells, independent of disposable trials
++  vector<VarnodeData> unresolvedInputStorages;	///< Unresolved call input locations, independent of disposable trials
    ParamActive activeinput;	///< Info for recovering input parameters
    ParamActive activeoutput;	///< Info for recovering output parameters
    mutable vector<int4> inputConsume;	///< Number of bytes consumed by sub-function, for each input parameter
